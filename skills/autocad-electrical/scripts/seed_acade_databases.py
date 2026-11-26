@@ -13,11 +13,45 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_AEDATA = Path(r"F:\OneDrive\Documents\Acade 2027\AeData\en-US")
+
+
+def detect_aedata_dir() -> Path:
+    """Auto-detect Acade 2027 AeData\\en-US path from OneDrive, Documents, or UserDataCache."""
+    candidates = [
+        Path.home() / "OneDrive" / "Documents" / "Acade 2027" / "AeData" / "en-US",
+        Path(r"F:\OneDrive\Documents\Acade 2027\AeData\en-US"),
+        Path.home() / "Documents" / "Acade 2027" / "AeData" / "en-US",
+        Path(r"C:\Program Files\Autodesk\AutoCAD 2027\Acade\UserDataCache\My Documents\Acade 2027\AeData\en-US"),
+    ]
+    for p in candidates:
+        if (p / "Catalogs" / "default_cat.mdb").exists():
+            return p
+    return candidates[0]
+
+
+def detect_panel_libs_dir() -> Path:
+    """Auto-detect ACADE Libs\\panel folder from registry or standard paths."""
+    candidates = [
+        Path(r"F:\Projects\CAD\Libraries\AutoCAD-Electrical\2027\Libs\panel"),
+        Path(r"C:\Users\Public\Documents\Autodesk\Acade 2027\Libs\panel"),
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return candidates[0]
+
+
+def backup_mdb(mdb_path: Path) -> Path:
+    """Create a .mdb.bak safety backup before mutating an Access database."""
+    bak = mdb_path.with_suffix(".mdb.bak")
+    if not bak.exists():
+        shutil.copy2(mdb_path, bak)
+    return bak
 
 FAMILY_TO_TABLE = {
     "Q": "CB",
@@ -58,6 +92,7 @@ def _sql_val(val: str) -> str:
 
 def seed_catalog_mdb(cat_mdb: Path, seed_csv: Path) -> dict[str, int]:
     """Upsert catalog_master_seed.csv rows into default_cat.mdb family tables and _PINLIST."""
+    backup_mdb(cat_mdb)
     with seed_csv.open("r", encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
 
@@ -120,8 +155,31 @@ Write-Output $applied
     return {"catalog_rows": len(rows), "sql_statements": applied}
 
 
-def seed_footprint_mdb(fp_mdb: Path, fp_csv: Path) -> dict[str, int]:
-    """Upsert verified_footprints_catalog.csv entries into footprint_lookup.mdb."""
+def _build_panel_footprint_dxf_if_missing(panel_dir: Path, mfg: str, blknam: str, w_mm: float, h_mm: float, cat: str) -> Path:
+    """Create a real 1:1 mm Smart Panel Footprint DXF with P_TAG1/MFG/CAT/LOC/ASSYCODE attributes so BLKNAM exists on disk."""
+    import ezdxf
+
+    out_dir = panel_dir / "CUSTOM" / mfg
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{blknam}.dxf"
+    if not out_path.exists():
+        doc = ezdxf.new("R2018", setup=True)
+        doc.header["$INSUNITS"] = 4
+        doc.header["$MEASUREMENT"] = 1
+        msp = doc.modelspace()
+        msp.add_lwpolyline([(0, 0), (w_mm, 0), (w_mm, h_mm), (0, h_mm), (0, 0)])
+        msp.add_attdef("P_TAG1", insert=(2.0, h_mm - 5.0), text="", height=3.0)
+        msp.add_attdef("MFG", insert=(2.0, 2.0), text=mfg, height=2.0, dxfattribs={"flags": 1})
+        msp.add_attdef("CAT", insert=(2.0, 5.0), text=cat, height=2.0, dxfattribs={"flags": 1})
+        msp.add_attdef("LOC", insert=(2.0, 8.0), text="+MAIN_PNL", height=2.0, dxfattribs={"flags": 1})
+        msp.add_attdef("ASSYCODE", insert=(2.0, 11.0), text="", height=2.0, dxfattribs={"flags": 1})
+        doc.saveas(out_path)
+    return out_path
+
+
+def seed_footprint_mdb(fp_mdb: Path, fp_csv: Path, panel_dir: Path) -> dict[str, int]:
+    """Upsert verified_footprints_catalog.csv entries into footprint_lookup.mdb and ensure footprint files exist on disk."""
+    backup_mdb(fp_mdb)
     with fp_csv.open("r", encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
 
@@ -129,17 +187,19 @@ def seed_footprint_mdb(fp_mdb: Path, fp_csv: Path) -> dict[str, int]:
     for row in rows:
         mfg = _sql_esc(row.get("MFG", "").upper())
         cat = _sql_esc(row.get("CAT", "").upper())
-        w = row.get("W_MM", "0").strip()
-        h = row.get("H_MM", "0").strip()
+        w = float(row.get("W_MM", "0") or 0)
+        h = float(row.get("H_MM", "0") or 0)
         mnt = row.get("MOUNT_TYPE", "").strip()
         if not mfg or not cat:
             continue
         blknam = _sql_esc(f"PNL_{mfg}_{cat}".replace("-", "_"))
+        _build_panel_footprint_dxf_if_missing(panel_dir, mfg, blknam, w, h, cat)
+        rel_blk = _sql_esc(f"CUSTOM/{mfg}/{blknam}")
         desc = _sql_esc(f"{w}x{h}mm {mnt}")
         statements.append(f"DELETE FROM [{mfg}] WHERE CATALOG='{cat}'")
         statements.append(
             f"INSERT INTO [{mfg}] (CATALOG, ASSEMBLYCODE, BLKNAM, DESCRIPTION) "
-            f"VALUES ({_sql_val(cat)}, NULL, {_sql_val(blknam)}, {_sql_val(desc)})"
+            f"VALUES ({_sql_val(cat)}, NULL, {_sql_val(rel_blk)}, {_sql_val(desc)})"
         )
 
     payload_json = json.dumps(statements)
@@ -197,7 +257,8 @@ $conn.Close()
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Seed ACADE 2027 Access Databases (.mdb) from skill templates")
-    parser.add_argument("--aedata", type=Path, default=DEFAULT_AEDATA, help="Path to AeData\\en-US folder")
+    parser.add_argument("--aedata", type=Path, default=detect_aedata_dir(), help="Path to AeData\\en-US folder")
+    parser.add_argument("--panel-libs", type=Path, default=detect_panel_libs_dir(), help="Path to Libs\\panel folder")
     args = parser.parse_args()
 
     cat_mdb = args.aedata / "Catalogs" / "default_cat.mdb"
@@ -205,7 +266,7 @@ def main() -> None:
     plc_mdb = args.aedata / "Plc" / "ace_plc.mdb"
 
     cat_res = seed_catalog_mdb(cat_mdb, SKILL_DIR / "templates" / "catalog_master_seed.csv")
-    fp_res = seed_footprint_mdb(fp_mdb, SKILL_DIR / "templates" / "verified_footprints_catalog.csv")
+    fp_res = seed_footprint_mdb(fp_mdb, SKILL_DIR / "templates" / "verified_footprints_catalog.csv", args.panel_libs)
     plc_res = verify_plc_codes(plc_mdb, SKILL_DIR / "templates" / "plc_io_import_template.csv")
 
     print(json.dumps({"catalog": cat_res, "footprint": fp_res, "plc": plc_res}, indent=2))

@@ -39,6 +39,34 @@ def _lisp_acade_load() -> str:
     )
 
 
+def _lisp_fail_loud_guard(req_fns: list[str], err_file: str) -> str:
+    """Emit AutoLISP guard that writes an error file if any required ACADE function is unbound."""
+    checks = " ".join(f'(if (not (boundp \'{fn})) (setq _missing (cons "{fn}" _missing)))' for fn in req_fns)
+    return (
+        f'(setq _missing nil) {checks} '
+        f'(if _missing (progn (setq _f (open {_lisp_str(err_file)} "w")) '
+        f'(write-line (strcat "Missing ACADE APIs: " (vl-princ-to-string _missing)) _f) '
+        f'(close _f))) '
+    )
+
+
+def _run_acade_lisp_checked(lisp_body: str, req_fns: list[str], auto_save: bool = True) -> dict[str, Any]:
+    """Send ACADE AutoLISP via COM and raise RuntimeError if any required function is unbound."""
+    import tempfile
+
+    err_path = Path(tempfile.gettempdir()) / "acade_mcp_err.txt"
+    if err_path.exists():
+        err_path.unlink()
+    guard = _lisp_fail_loud_guard(req_fns, str(err_path))
+    full_cmd = f"(progn {_lisp_acade_load()} {guard} (if (not _missing) (progn {lisp_body})))\n"
+    res = tool_autocad_run_command({"command": full_cmd, "auto_save": auto_save})
+    if err_path.exists():
+        msg = err_path.read_text(encoding="utf-8", errors="replace").strip()
+        err_path.unlink(missing_ok=True)
+        raise RuntimeError(f"ACADE Fail-Loud: {msg}")
+    return res
+
+
 def _lisp_str(val: str) -> str:
     return '"' + str(val).replace("\\", "/").replace('"', '\\"') + '"'
 
@@ -555,7 +583,7 @@ $first = $payload.sheets[0]
 $doc = $acad.Documents.Open($first)
 $doc.Activate()
 $wdpLisp = $payload.wdp_path
-$cmd = $payload.load_lisp + '(if c:wd_proj_wdp_activate (c:wd_proj_wdp_activate "' + $wdpLisp + '")) (if c:wd_mdb_rebuild (c:wd_mdb_rebuild))' + "`n"
+$cmd = $payload.load_lisp + '(command "_AEOPENPROJECT" "' + $wdpLisp + '") (if (boundp \'c:ace_add_dwg_to_project) (c:ace_add_dwg_to_project nil (list "" "" "" 1))) (command "_AEREBUILDDB")' + "`n"
 $doc.SendCommand($cmd)
 @{{ wdp = $payload.wdp_path; created_dwgs = $created; active = $doc.FullName }} | ConvertTo-Json -Compress
 """
@@ -567,39 +595,35 @@ def tool_acade_insert_schematic_symbol(args: dict[str, Any]) -> dict[str, Any]:
     block_name = args["block_name"]
     pt = args["point"]
     scale = float(args.get("scale", 1.0))
-    options = int(args.get("options", 0))
     attrs = args.get("attributes") or {}
     auto_save = bool(args.get("auto_save", True))
 
-    mod_exprs = []
-    for k, v in attrs.items():
-        mod_exprs.append(f'(c:wd_modattrval _ent {_lisp_str(k)} {_lisp_str(v)} nil)')
-    mod_block = " ".join(mod_exprs)
-
-    lisp = (
-        f"(progn {_lisp_acade_load()}"
-        f"(setq _ent (c:wd_insym2 {_lisp_str(block_name)} '({float(pt[0])} {float(pt[1])} 0.0) {scale} {options})) "
-        f"(if _ent (progn {mod_block} (entupd _ent))))\n"
+    mod_exprs = [f'(c:wd_modattrval _ent {_lisp_str(k)} {_lisp_str(v)} nil)' for k, v in attrs.items()]
+    lisp_body = (
+        f"(setq _ent (c:wd_insym2 {_lisp_str(block_name)} '({float(pt[0])} {float(pt[1])} 0.0) {scale} nil)) "
+        f"(if (not _ent) (princ \"\\n[ACADE_ERR] wd_insym2 returned nil\\n\") "
+        f"(progn {' '.join(mod_exprs)} (entupd _ent)))"
     )
-    return tool_autocad_run_command({"command": lisp, "auto_save": auto_save})
+    return _run_acade_lisp_checked(lisp_body, ["c:wd_insym2", "c:wd_modattrval"], auto_save=auto_save)
 
 
 def tool_acade_draw_smart_wires_and_arrows(args: dict[str, Any]) -> dict[str, Any]:
-    """Register ACADE wire layers, draw smart orthogonal wires, insert WDDOT tees, and paired Source/Dest arrows."""
+    """Draw smart ACADE wires via (c:wd_wire_quik), register VIA_WD_WIRETYPE XDATA, insert WDDOT, and Source/Dest arrows."""
     wire_layers = args.get("wire_layers") or []
     wires = args.get("wires") or []
     dots = args.get("dots") or []
     arrows = args.get("arrows") or []
     auto_save = bool(args.get("auto_save", True))
 
-    reg_exprs = []
+    reg_exprs = ['(regapp "VIA_WD_WIRETYPE")']
     for wl in wire_layers:
         lname = wl["layer"]
-        color = int(wl.get("color", 7))
         wcol = wl.get("wire_color", "")
         wsize = wl.get("wire_size", "")
         reg_exprs.append(
-            f'(if c:wd_put_wnet_lay (c:wd_put_wnet_lay {_lisp_str(lname)} {color} {_lisp_str(wcol)} {_lisp_str(wsize)}))'
+            f'(if (setq _le (tblobjname "LAYER" {_lisp_str(lname)})) '
+            f'(progn (setq _ed (vl-remove-if \'(lambda (x) (= (car x) -3)) (entget _le \'("VIA_WD_WIRETYPE")))) '
+            f'(entmod (append _ed (list (list -3 (list "VIA_WD_WIRETYPE" (cons 1000 {_lisp_str(wcol)}) (cons 1000 {_lisp_str(wsize)}))))))))'
         )
 
     wire_exprs = []
@@ -607,13 +631,11 @@ def tool_acade_draw_smart_wires_and_arrows(args: dict[str, Any]) -> dict[str, An
         p1, p2 = w["p1"], w["p2"]
         lyr = w["layer"]
         wire_exprs.append(
-            f'(entmake (list \'(0 . "LINE") (cons 8 {_lisp_str(lyr)}) '
-            f'(list 10 {float(p1[0])} {float(p1[1])} 0.0) (list 11 {float(p2[0])} {float(p2[1])} 0.0)))'
+            f'(setvar "CLAYER" {_lisp_str(lyr)}) '
+            f'(c:wd_wire_quik \'({float(p1[0])} {float(p1[1])} 0.0) \'({float(p2[0])} {float(p2[1])} 0.0) nil)'
         )
 
-    dot_exprs = []
-    for d in dots:
-        dot_exprs.append(f'(c:wd_insym2 "WDDOT" \'({float(d[0])} {float(d[1])} 0.0) 1.0 0)')
+    dot_exprs = [f'(c:wd_insym2 "WDDOT" \'({float(d[0])} {float(d[1])} 0.0) 1.0 nil)' for d in dots]
 
     arrow_exprs = []
     for a in arrows:
@@ -621,21 +643,21 @@ def tool_acade_draw_smart_wires_and_arrows(args: dict[str, Any]) -> dict[str, An
         pt = a["point"]
         sig = a["sigcode"]
         wno = a.get("wireno", "")
-        fn = "c:wd_ins_sig_src" if kind == "source" else "c:wd_ins_sig_dst"
-        blk = "HA1S1" if kind == "source" else "ha1d1"
+        blk = "HA1S1" if kind == "source" else "HA1D3"
         arrow_exprs.append(
-            f'(if {fn} ({fn} {_lisp_str(blk)} \'({float(pt[0])} {float(pt[1])} 0.0) {_lisp_str(sig)} {_lisp_str(wno)}) '
-            f'(progn (setq _a (c:wd_insym2 {_lisp_str(blk)} \'({float(pt[0])} {float(pt[1])} 0.0) 1.0 0)) '
+            f'(setq _a (c:wd_insym2 {_lisp_str(blk)} \'({float(pt[0])} {float(pt[1])} 0.0) 1.0 nil)) '
             f'(if _a (progn (c:wd_modattrval _a "SIGCODE" {_lisp_str(sig)} nil) '
-            f'(c:wd_modattrval _a "WIRENO" {_lisp_str(wno)} nil)))))'
+            f'(c:wd_modattrval _a "WIRENO" {_lisp_str(wno)} nil) (entupd _a)))'
         )
+    if arrows:
+        arrow_exprs.append('(command "_AEUPDATESIGREF")')
 
-    lisp = f"(progn {_lisp_acade_load()} {' '.join(reg_exprs)} {' '.join(wire_exprs)} {' '.join(dot_exprs)} {' '.join(arrow_exprs)})\n"
-    return tool_autocad_run_command({"command": lisp, "auto_save": auto_save})
+    lisp_body = f"{' '.join(reg_exprs)} {' '.join(wire_exprs)} {' '.join(dot_exprs)} {' '.join(arrow_exprs)}"
+    return _run_acade_lisp_checked(lisp_body, ["c:wd_wire_quik", "c:wd_insym2", "c:wd_modattrval"], auto_save=auto_save)
 
 
 def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
-    """Validate peripheral BLOCK column in PLC I/O CSV and trigger ACADE Spreadsheet to PLC I/O Utility."""
+    """Validate peripheral BLOCK column in PLC I/O CSV and run ACADE Spreadsheet to PLC I/O Utility."""
     import csv as _csv
 
     csv_path = Path(args["csv_path"]).resolve()
@@ -655,26 +677,22 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
             "Use real iec-60617 peripheral symbols (e.g., VCR1, VPB11, VLT1A, VSW12) or leave blank."
         )
 
-    lisp = (
-        f"(progn {_lisp_acade_load()}"
-        f"(if c:wd_io_doit (c:wd_io_doit {_lisp_str(str(csv_path))} {_lisp_str(str(wdi_path))}) "
-        f"(command \"_AEPLCIO\")))\n"
-    )
-    return tool_autocad_run_command({"command": lisp, "auto_save": bool(args.get("auto_save", True))})
+    lisp_body = f'(command "_AEPLCIO" {_lisp_str(str(csv_path))} {_lisp_str(str(wdi_path))})'
+    return _run_acade_lisp_checked(lisp_body, ["c:wd_inplc_nd"], auto_save=bool(args.get("auto_save", True)))
 
 
 def tool_acade_sync_panel_footprints(args: dict[str, Any]) -> dict[str, Any]:
-    """Query COMP (+MAIN_PNL, +DOOR) from Project Scratch .mdb and return/insert Panel Footprints with P_TAG1."""
+    """Query COMP (PAR1_CHLD2='1' AND LOC IN ('+MAIN_PNL','+DOOR')) from Scratch .mdb to sync Panel Footprints."""
     mdb_path = Path(args["mdb_path"]).resolve()
     if not mdb_path.exists():
         raise FileNotFoundError(f"Scratch database not found: {mdb_path}")
     mdb_str = str(mdb_path).replace("'", "''")
     ps = f"""
 $ErrorActionPreference = 'Stop'
-$conn = New-Object System.Data.Odbc.OdbcConnection("Driver={{Microsoft Access Driver (*.mdb, *.accdb)}};Dbq=$mdb_str;ReadOnly=1;")
+$conn = New-Object System.Data.Odbc.OdbcConnection("Driver={{Microsoft Access Driver (*.mdb, *.accdb)}};Dbq=$mdb_str;")
 $conn.Open()
 $cmd = $conn.CreateCommand()
-$cmd.CommandText = "SELECT TAGNAME, MFG, CAT, LOC, INST, DESC1 FROM [COMP] WHERE LOC IN ('+MAIN_PNL','+DOOR') ORDER BY LOC, TAGNAME"
+$cmd.CommandText = "SELECT TAGNAME, MFG, CAT, LOC, INST, DESC1 FROM [COMP] WHERE PAR1_CHLD2='1' AND LOC IN ('+MAIN_PNL','+DOOR') ORDER BY LOC, TAGNAME"
 $r = $cmd.ExecuteReader()
 $items = @()
 while ($r.Read()) {{
@@ -693,21 +711,25 @@ $conn.Close()
 """
     res = _run_ps(ps, timeout=30)
     if args.get("run_aefootprint"):
-        tool_autocad_run_command({"command": f"(progn {_lisp_acade_load()}(command \"_AEFOOTPRINT\"))\n", "auto_save": True})
+        _run_acade_lisp_checked('(command "_AEFOOTPRINT")', ["c:wd_insym2"], auto_save=True)
     return res
 
 
 def tool_acade_run_reports_and_retag(args: dict[str, Any]) -> dict[str, Any]:
-    """Run project-wide AERETAG, AEWIRENO, AEUPDATETITLEBLOCK, and AEREPORTGROUP (.rgf)."""
+    """Run project-wide AEREBUILDDB, c:wd_retag_update_noprompts, AEWIRENO, c:wd_tb_process_one, and AEREPORTGROUP (.rgf)."""
     rgf_path = Path(args.get("rgf_path") or DEFAULT_RGF).resolve()
-    lisp = (
-        f"(progn {_lisp_acade_load()}"
-        f"(if c:wd_mdb_rebuild (c:wd_mdb_rebuild)) "
-        f"(if c:ace_retag (c:ace_retag)) "
-        f"(if c:wd_tb_process_all (c:wd_tb_process_all)) "
-        f"(if (and c:wd_rep_auto_run (findfile {_lisp_str(str(rgf_path))})) (c:wd_rep_auto_run {_lisp_str(str(rgf_path))})))\n"
+    lisp_body = (
+        '(command "_AEREBUILDDB") '
+        '(c:wd_retag_update_noprompts 97 nil) '
+        '(command "_AEWIRENO") '
+        '(c:wd_tb_process_one 1 (list (list 1 1 1 1 1 1 1 1 0 0 1 1 1))) '
+        f'(if (findfile {_lisp_str(str(rgf_path))}) (command "_AEREPORTGROUP" {_lisp_str(str(rgf_path))}))'
     )
-    return tool_autocad_run_command({"command": lisp, "auto_save": bool(args.get("auto_save", True))})
+    return _run_acade_lisp_checked(
+        lisp_body,
+        ["c:wd_retag_update_noprompts", "c:wd_tb_process_one"],
+        auto_save=bool(args.get("auto_save", True)),
+    )
 
 
 def tool_acade_electrical_audit(args: dict[str, Any]) -> dict[str, Any]:

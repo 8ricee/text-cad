@@ -768,6 +768,8 @@ def build_custom_symbol_va1_weigh_trans() -> Path:
         ("WDBLKNAM", (6, 50), "VA1_WEIGH_TRANS", 1.7),
         ("LOC", (6, 45), "+MAIN_PNL", 1.8),
         ("INST", (28, 45), "=PLC1", 1.8),
+        ("FAMILY", (45, 45), "A", 1.7),
+        ("XREF", (6, 35), "", 1.7),
         ("RATING1", (6, 40), "5.0W", 1.7),
         ("RATING2", (22, 40), "0.2A", 1.7),
     ]
@@ -817,10 +819,11 @@ def build_native_acade_project_manifest(project_dir: Path, project_name: str = "
             },
         },
         "schematic_symbols_sheet_05": [
-            {"block_name": "VFU1", "point": [100.0, 250.0], "attributes": {"TAG1": "-F1", "MFG": "SIEMENS", "CAT": "3NW7031", "LOC": "+MAIN_PNL", "DESC1": "PHASE FUSE 3P 2A"}},
-            {"block_name": "VCB1", "point": [142.0, 250.0], "attributes": {"TAG1": "-Q3", "MFG": "SIEMENS", "CAT": "5SL6210-7", "LOC": "+MAIN_PNL", "DESC1": "MCB 2P 10A PSU"}},
-            {"block_name": "VMS1", "point": [45.0, 240.0], "attributes": {"TAG1": "-Q2", "MFG": "SIEMENS", "CAT": "3RV2021-4AA10", "LOC": "+MAIN_PNL", "DESC1": "MPCB VFD 16A"}},
-            {"block_name": "VCR1", "point": [45.0, 210.0], "attributes": {"TAG1": "-K1", "MFG": "SIEMENS", "CAT": "3RT2026-1BB40", "LOC": "+MAIN_PNL", "DESC1": "CONVEYOR CONTACTOR", "ASSYCODE": "AUX_3RH2911_2NO2NC;DIODE_3RT2926"}},
+            {"block_name": "VFU1_S00371", "point": [100.0, 250.0], "attributes": {"TAG1": "-F1", "MFG": "SIEMENS", "CAT": "3NW7031", "LOC": "+MAIN_PNL", "DESC1": "PHASE FUSE 3P 2A"}},
+            {"block_name": "VCB11Q13", "point": [142.0, 250.0], "attributes": {"TAG1": "-Q3", "MFG": "SIEMENS", "CAT": "5SL6210-7", "LOC": "+MAIN_PNL", "DESC1": "MCB 2P 10A PSU"}},
+            {"block_name": "VMS2NA13F", "point": [45.0, 240.0], "attributes": {"TAG1": "-Q2", "MFG": "SIEMENS", "CAT": "3RV2021-4AA10", "LOC": "+MAIN_PNL", "DESC1": "MPCB VFD 16A"}},
+            {"block_name": "VCR1", "point": [295.0, 240.0], "attributes": {"TAG1": "-K1", "MFG": "SIEMENS", "CAT": "3RT2026-1BB40", "LOC": "+MAIN_PNL", "DESC1": "CONVEYOR CONTACTOR COIL", "ASSYCODE": "AUX_3RH2911_2NO2NC;DIODE_3RT2926"}},
+            {"block_name": "VCR21", "point": [45.0, 210.0], "attributes": {"TAG2": "-K1", "MFG": "SIEMENS", "CAT": "3RT2026-1BB40", "LOC": "+MAIN_PNL", "DESC1": "CONTACTOR POWER POLE L1"}},
             {"block_name": "VMO13", "point": [60.0, 103.0], "attributes": {"TAG1": "-M1", "MFG": "SIEMENS", "CAT": "1LE1001-1BB22", "LOC": "+FIELD", "DESC1": "CONVEYOR MOTOR 4.0KW"}},
             {"block_name": "ht1001", "point": [235.0, 253.0], "attributes": {"TAGSTRIP": "-X1", "TERM01": "F1", "MFG": "PHOENIX CONTACT", "CAT": "3004100", "LOC": "+MAIN_PNL"}},
             {"block_name": "VA1_WEIGH_TRANS", "point": [212.0, 125.0], "attributes": {"TAG1": "-A2", "MFG": "SIEMENS", "CAT": "7MH4910-0AA01", "LOC": "+MAIN_PNL", "INST": "=PLC1"}},
@@ -980,62 +983,12 @@ def build_sheet_07_panel_layout(scene: PanelAssembly3D) -> Path:
     )
     vp.dxf.status = 1
 
+    # Note: Panel BOM (panel_bom_bilingual.set) and Nameplate Schedule are placed dynamically
+    # via native ACADE AEREPORT / AEREPORTGROUP (Put on Drawing), never hardcoded draw_grid_table() arrays.
     draw_grid_table(
-        psp,
-        x0=232.0,
-        y_top=284.0,
-        col_widths=[10.0, 16.0, 74.0, 25.0, 32.0, 10.0, 14.0],
-        headers=["NO", "TAG", "DESCRIPTION (EN / VI)", "MFG", "CATALOG NO.", "QTY", "LOC"],
-        rows=[
-            ["1", "-Q1", "MCCB 4P (3P+N) 63A (BẮT VÍT TRỰC TIẾP BASE)", "SIEMENS", "3VA1163-4FF42", "1", "+MAIN"],
-            ["2", "-F1", "BỘ CẦU CHÌ BÁO PHA 3P 10x38 2A (GÀI RAY)", "SIEMENS", "3NW7031", "1", "+MAIN"],
-            ["3", "-Q3", "MCB 2P 10A (L1-N CẤP NGUỒN 24VDC & QUẠT)", "SIEMENS", "5SL6210-7", "1", "+MAIN"],
-            ["4", "-Q2", "MPCB 16A + AUX / CB BẢO VỆ VFD (GÀI RAY)", "SIEMENS", "3RV2021+3RV2901", "1+1", "+MAIN"],
-            ["5", "-K1", "CONTACTOR 25A + DIODE / KHỞI ĐỘNG TỪ (RAY)", "SIEMENS", "3RT2026+3RT2926", "1+1", "+MAIN"],
-            ["6", "-U1", "SINAMICS G120C 4kW (BẮT VÍT TRỰC TIẾP BASE)", "SIEMENS", "6SL3210-1KE18", "1+1", "+MAIN"],
-            ["7", "-G1", "SITOP PSU100S 24VDC/10A (VÀO 230VAC L1-N)", "SIEMENS", "6EP1334-2BA20", "1", "+MAIN"],
-            ["8", "-A1", "S7-1500 CPU 1511 + 4 MODULES (RAY NHÔM S7)", "SIEMENS", "6ES7511+MODULES", "1+4", "+MAIN"],
-            ["9", "-K_SAF1", "SAFETY RELAY 3SK1 / RƠ-LE AN TOÀN (GÀI RAY)", "SIEMENS", "3SK1111-1AB30", "1", "+MAIN"],
-            ["10", "-A2", "WEIGH TRANS + ỐC CÁP EMC M16 + KẸP SK14", "SIEMENS", "7MH4910+ASSY", "1+2", "+MAIN"],
-            ["11", "-X0", "CẦU ĐẤU ĐỘNG LỰC DOMINO 63A (L1,L2,L3,N,PE)", "PHOENIX", "3044199 (UT 16)", "9", "+MAIN"],
-            ["12", "-X1..-X3", "CẦU ĐẤU CẦU CHÌ 24V + CẦU ĐẤU 3 TẦNG LOAD CELL", "PHOENIX", "3004100+3036042", "3+12", "+MAIN"],
-            ["13", "-H_L1..3", "3 ĐÈN BÁO PHA L1-L2-L3 Ø22.5 (ĐỎ-VÀNG-XANH)", "SIEMENS", "3SU1152-6AA20", "3", "+DOOR"],
-            ["14", "-S10..H1", "NÚT DỪNG KHẨN Ø40 + ĐÈN CHẠY & NÚT CHẠY/DỪNG", "SIEMENS", "3SU1150+3SU1152", "4", "+DOOR"],
-        ],
-        title="PANEL BILL OF MATERIALS / BẢNG VẬT TƯ TỦ ĐIỆN (PHÂN BIỆT GÀI RAY & BẮT VÍT BASE)",
-        row_h=4.6,
-        header_h=5.2,
-        title_h=5.8,
-        text_h=1.62,
-    )
-
-    bot_np = draw_grid_table(
         psp,
         x0=24.0,
         y_top=142.0,
-        col_widths=[14.0, 16.0, 14.0, 56.0, 56.0, 22.0, 28.0],
-        headers=["NP#", "TAG", "LOC", "LINE 1 (ENGLISH)", "LINE 2 (TIẾNG VIỆT)", "SIZE(mm)", "COLOR"],
-        rows=[
-            ["NP-01", "PANEL", "+DOOR", "CONVEYOR WEIGHING PANEL", "TỦ ĐIỀU KHIỂN TRẠM CÂN BĂNG TẢI", "150x50", "WHITE/BLACK"],
-            ["NP-02", "-Q1", "+MAIN", "MAIN INCOMER MCCB 63A", "ÁPTÔMÁT TỔNG ĐẦU VÀO 3P 63A", "70x25", "WHITE/BLACK"],
-            ["NP-03", "-S10", "+DOOR", "EMERGENCY STOP", "DỪNG KHẨN CẤP (XOAY NHẢ)", "Ø60 RING", "YELLOW/BLACK"],
-            ["NP-04", "-H1", "+DOOR", "CONVEYOR RUNNING", "ĐÈN BÁO BĂNG TẢI ĐANG CHẠY", "50x18", "WHITE/BLACK"],
-            ["NP-05", "-S11", "+DOOR", "CONVEYOR START", "NÚT NHẤN CHẠY BĂNG TẢI", "50x18", "WHITE/BLACK"],
-            ["NP-06", "-S12", "+DOOR", "CONVEYOR STOP", "NÚT NHẤN DỪNG BĂNG TẢI", "50x18", "WHITE/BLACK"],
-            ["NP-07", "-A2", "+MAIN", "6-WIRE LOAD CELL TRANS.", "BỘ KHUẾCH ĐẠI CÂN LOAD CELL", "60x20", "WHITE/BLACK"],
-            ["NP-08", "WARN", "+MAIN", "DANGER! 400VAC BUSBAR", "NGUY HIỂM! ĐIỆN ÁP CAO 400VAC", "100x40", "YELLOW/RED"],
-        ],
-        title="BẢNG BIỂN TÊN KHẮC LASER 2 LỚP (NAMEPLATE SCHEDULE VIA AEREPORT)",
-        row_h=5.0,
-        header_h=5.5,
-        title_h=6.0,
-        text_h=1.68,
-    )
-
-    draw_grid_table(
-        psp,
-        x0=24.0,
-        y_top=bot_np - 3.0,
         col_widths=[36.0, 48.0, 44.0, 78.0],
         headers=["VỊ TRÍ / THIẾT BỊ", "LỖ KHOÉT / CUTOUT (mm)", "CAO ĐỘ LẮP (TỪ ĐÁY)", "TIÊU CHUẨN MÀU / GHI CHÚ GIA CÔNG"],
         rows=[

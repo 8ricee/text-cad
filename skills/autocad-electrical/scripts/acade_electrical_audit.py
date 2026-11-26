@@ -1,17 +1,25 @@
-"""AutoCAD Electrical Project Scratch Database (.mdb) Gatekeeper Audit.
+"""AutoCAD Electrical Project Scratch Database (.mdb) Gatekeeper Audit (Fail-Closed).
 
-Queries the ACADE Project Scratch Database (<project>.mdb: COMP, TERMS, WIRENO, XREF, PNLCOMP)
-via 64-bit Windows ODBC (System.Data.Odbc) and fails hard (exit code 2) if any violation is found:
-1. bogus_wires / unconnected_wire_stubs > 0
-2. orphaned_child_contacts > 0
-3. duplicate_component_tags > 0
-4. missing_catalog_data (MFG or CAT empty) > 0
-5. schematic_vs_panel_discrepancy (+MAIN_PNL / +DOOR missing in PNLCOMP) > 0
+Queries the real ACADE 2027 Project Scratch Database (<project>.mdb):
+- COMP (PAR1_CHLD2=1 Parent, PAR1_CHLD2=2 Child)
+- PNLCOMP (Panel Footprint components)
+- WIRE_ERR (Wire errors)
+- WFRM2ALL (From/To wire list)
+via 64-bit Windows ODBC (System.Data.Odbc).
+
+Fails closed (passed=False, exit code 2) if:
+1. COMP table is missing or empty (unbuilt/unlinked Scratch DB)
+2. missing_catalog (MFG or CAT empty) > 0
+3. duplicate_tags (same TAGNAME+LOC+INST among PAR1_CHLD2='1' Parents) > 0
+4. orphaned_child_contacts (PAR1_CHLD2='2' Child without matching Parent in COMP) > 0
+5. wire_errors (rows in WIRE_ERR or '?' wire numbers in WFRM2ALL) > 0
+6. schematic_vs_panel_discrepancy (+MAIN_PNL / +DOOR Parents missing in PNLCOMP) > 0
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import subprocess
 from pathlib import Path
@@ -19,16 +27,15 @@ from typing import Any
 
 
 def audit_scratch_database(mdb_path: Path) -> dict[str, Any]:
-    """Query ACADE Project Scratch .mdb and return structured audit findings + pass/fail."""
+    """Query ACADE Project Scratch .mdb (Fail-Closed) and return structured audit findings."""
     if not mdb_path.exists():
         raise FileNotFoundError(f"Scratch database not found: {mdb_path}")
 
     mdb_str = str(mdb_path.resolve()).replace("'", "''")
     ps = f"""
-$ErrorActionPreference = 'Stop'
-$conn = New-Object System.Data.Odbc.OdbcConnection("Driver={{Microsoft Access Driver (*.mdb, *.accdb)}};Dbq=$mdb_str;ReadOnly=1;")
+$conn = New-Object System.Data.Odbc.OdbcConnection("Driver={{Microsoft Access Driver (*.mdb, *.accdb)}};Dbq=$mdb_str;")
 $conn.Open()
-$tables = $conn.GetSchema("Tables") | Where-Object {{ $_.TABLE_TYPE -eq "TABLE" }} | Select-Object -ExpandProperty TABLE_NAME
+$tables = @($conn.GetSchema("Tables") | Where-Object {{ $_.TABLE_TYPE -eq "TABLE" }} | Select-Object -ExpandProperty TABLE_NAME)
 
 function Run-Query($sql) {{
     $rows = @()
@@ -47,37 +54,60 @@ function Run-Query($sql) {{
     return ,$rows
 }}
 
-$missingCat = @()
-$dupTags = @()
-$orphans = @()
-$unconnectedStubs = @()
-$panelDiscrepancies = @()
-
-if ($tables -contains "COMP") {{
-    $missingCat = Run-Query "SELECT TAGNAME, SHEET, LOC, INST FROM [COMP] WHERE (MFG IS NULL OR MFG='') OR (CAT IS NULL OR CAT='')"
-    $dupTags = Run-Query "SELECT TAGNAME, LOC, INST, COUNT(*) AS CNT FROM [COMP] WHERE TAGNAME IS NOT NULL AND TAGNAME<>'' GROUP BY TAGNAME, LOC, INST HAVING COUNT(*) > 1"
-    if ($tables -contains "XREF") {{
-        $orphans = Run-Query "SELECT x.TAGNAME, x.SHEET FROM [XREF] x LEFT JOIN [COMP] c ON x.TAGNAME = c.TAGNAME WHERE c.TAGNAME IS NULL AND x.TAGNAME IS NOT NULL AND x.TAGNAME<>''"
-    }}
-    if ($tables -contains "PNLCOMP") {{
-        $panelDiscrepancies = Run-Query "SELECT c.TAGNAME, c.LOC, c.MFG, c.CAT FROM [COMP] c LEFT JOIN [PNLCOMP] p ON c.TAGNAME = p.TAGNAME WHERE (c.LOC='+MAIN_PNL' OR c.LOC='+DOOR') AND p.TAGNAME IS NULL AND c.TAGNAME IS NOT NULL AND c.TAGNAME<>''"
-    }}
+if (-not ($tables -contains "COMP")) {{
+    $conn.Close()
+    @{{
+        mdb = '{mdb_str}'
+        passed = $false
+        error = "FAIL-CLOSED: Scratch DB missing [COMP] table (run AEREBUILDDB / project sync first)."
+        tables_present = $tables
+    }} | ConvertTo-Json -Depth 4 -Compress
+    exit 0
 }}
 
-if ($tables -contains "WIRENO") {{
-    $unconnectedStubs = Run-Query "SELECT WIRENO, SHEET, DWGIX FROM [WIRENO] WHERE WIRENO IS NULL OR WIRENO='' OR WIRENO LIKE '?%'"
+$compCountRows = Run-Query "SELECT COUNT(*) AS CNT FROM [COMP]"
+$compTotal = [int]$compCountRows[0].CNT
+if ($compTotal -eq 0) {{
+    $conn.Close()
+    @{{
+        mdb = '{mdb_str}'
+        passed = $false
+        error = "FAIL-CLOSED: [COMP] table has 0 rows (empty or unbuilt Scratch Database)."
+        tables_present = $tables
+    }} | ConvertTo-Json -Depth 4 -Compress
+    exit 0
+}}
+
+$missingCat = Run-Query "SELECT TAGNAME, DWGIX, LOC, INST, PAR1_CHLD2 FROM [COMP] WHERE PAR1_CHLD2='1' AND ((MFG IS NULL OR MFG='') OR (CAT IS NULL OR CAT=''))"
+$dupTags = Run-Query "SELECT TAGNAME, LOC, INST, COUNT(*) AS CNT FROM [COMP] WHERE PAR1_CHLD2='1' AND TAGNAME IS NOT NULL AND TAGNAME<>'' GROUP BY TAGNAME, LOC, INST HAVING COUNT(*) > 1"
+$orphans = Run-Query "SELECT c.TAGNAME, c.DWGIX, c.LOC FROM [COMP] c LEFT JOIN (SELECT DISTINCT TAGNAME FROM [COMP] WHERE PAR1_CHLD2='1') p ON c.TAGNAME = p.TAGNAME WHERE c.PAR1_CHLD2='2' AND p.TAGNAME IS NULL AND c.TAGNAME IS NOT NULL AND c.TAGNAME<>''"
+
+$wireErrs = @()
+if ($tables -contains "WIRE_ERR") {{
+    $wireErrs += Run-Query "SELECT DWGIX, WIRENO, WIRELAY, X, Y FROM [WIRE_ERR]"
+}}
+if ($tables -contains "WFRM2ALL") {{
+    $wireErrs += Run-Query "SELECT WIRENO, NAM1, PIN1, NAM2, PIN2, WLAY1 FROM [WFRM2ALL] WHERE WIRENO IS NULL OR WIRENO='' OR WIRENO LIKE '?%'"
+}}
+
+$panelDiscrepancies = @()
+if ($tables -contains "PNLCOMP") {{
+    $panelDiscrepancies = Run-Query "SELECT c.TAGNAME, c.LOC, c.MFG, c.CAT FROM [COMP] c LEFT JOIN [PNLCOMP] p ON c.TAGNAME = p.TAGNAME WHERE c.PAR1_CHLD2='1' AND (c.LOC='+MAIN_PNL' OR c.LOC='+DOOR') AND p.TAGNAME IS NULL AND c.TAGNAME IS NOT NULL AND c.TAGNAME<>''"
+}} else {{
+    $panelDiscrepancies = Run-Query "SELECT TAGNAME, LOC, MFG, CAT FROM [COMP] WHERE PAR1_CHLD2='1' AND (LOC='+MAIN_PNL' OR LOC='+DOOR')"
 }}
 
 $conn.Close()
 
 $counts = @{{
+    comp_total = $compTotal
     missing_catalog = $missingCat.Count
     duplicate_tags = $dupTags.Count
     orphaned_child_contacts = $orphans.Count
-    unconnected_wire_stubs = $unconnectedStubs.Count
+    wire_errors = $wireErrs.Count
     schematic_vs_panel_discrepancy = $panelDiscrepancies.Count
 }}
-$passed = ($counts.missing_catalog -eq 0) -and ($counts.duplicate_tags -eq 0) -and ($counts.orphaned_child_contacts -eq 0) -and ($counts.unconnected_wire_stubs -eq 0) -and ($counts.schematic_vs_panel_discrepancy -eq 0)
+$passed = ($counts.missing_catalog -eq 0) -and ($counts.duplicate_tags -eq 0) -and ($counts.orphaned_child_contacts -eq 0) -and ($counts.wire_errors -eq 0) -and ($counts.schematic_vs_panel_discrepancy -eq 0)
 
 @{{
     mdb = '{mdb_str}'
@@ -88,13 +118,14 @@ $passed = ($counts.missing_catalog -eq 0) -and ($counts.duplicate_tags -eq 0) -a
         missing_catalog = ($missingCat | Select-Object -First 10)
         duplicate_tags = ($dupTags | Select-Object -First 10)
         orphaned_child_contacts = ($orphans | Select-Object -First 10)
-        unconnected_wire_stubs = ($unconnectedStubs | Select-Object -First 10)
+        wire_errors = ($wireErrs | Select-Object -First 10)
         schematic_vs_panel_discrepancy = ($panelDiscrepancies | Select-Object -First 10)
     }}
 }} | ConvertTo-Json -Depth 6 -Compress
 """
+    enc = base64.b64encode(ps.encode("utf-16le")).decode("ascii")
     proc = subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -107,7 +138,7 @@ $passed = ($counts.missing_catalog -eq 0) -and ($counts.duplicate_tags -eq 0) -a
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="ACADE Project Scratch Database (.mdb) Gatekeeper Audit")
+    parser = argparse.ArgumentParser(description="ACADE Project Scratch Database (.mdb) Gatekeeper Audit (Fail-Closed)")
     parser.add_argument("--mdb", type=Path, required=True, help="Path to <project>.mdb Scratch Database")
     args = parser.parse_args()
 
