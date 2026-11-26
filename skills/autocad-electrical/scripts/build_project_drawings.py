@@ -892,7 +892,16 @@ def execute_native_manifest(manifest: dict, mdb_path: Path | None = None) -> dic
         if (proj_dir / s).exists()
     ]
     retag_res = mcp.tool_acade_run_reports_and_retag({"sheet_paths": sheet_paths})
-    audit_res = mcp.tool_acade_electrical_audit({"mdb_path": str(mdb_path)}) if mdb_path else None
+    report_res = None
+    audit_res = None
+    if mdb_path and mdb_path.exists():
+        mcp.tool_autocad_open_or_new({"path": str(proj_dir / "07_panel_layout.dwg")})
+        bom_tbl = mcp.tool_acade_place_db_reports_on_drawing({"mdb_path": str(mdb_path), "report_type": "BOM", "insert": [232.0, 280.0, 0.0]})
+        mcp.tool_autocad_open_or_new({"path": str(proj_dir / "09_terminal_and_cable_list.dwg")})
+        wire_tbl = mcp.tool_acade_place_db_reports_on_drawing({"mdb_path": str(mdb_path), "report_type": "WIRE_FROM_TO", "insert": [25.0, 275.0, 0.0]})
+        term_tbl = mcp.tool_acade_place_db_reports_on_drawing({"mdb_path": str(mdb_path), "report_type": "TERMINAL_PLAN", "insert": [230.0, 275.0, 0.0]})
+        report_res = {"bom": bom_tbl, "wire_from_to": wire_tbl, "terminal_plan": term_tbl}
+        audit_res = mcp.tool_acade_electrical_audit({"mdb_path": str(mdb_path)})
     return {
         "init": init_res,
         "wires": wire_res,
@@ -900,6 +909,7 @@ def execute_native_manifest(manifest: dict, mdb_path: Path | None = None) -> dic
         "plc": plc_res,
         "panel": panel_res,
         "retag": retag_res,
+        "reports": report_res,
         "audit": audit_res,
     }
 

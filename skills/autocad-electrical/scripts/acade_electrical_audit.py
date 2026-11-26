@@ -33,7 +33,7 @@ def audit_scratch_database(mdb_path: Path) -> dict[str, Any]:
 
     mdb_str = str(mdb_path.resolve()).replace("'", "''")
     ps = f"""
-$conn = New-Object System.Data.Odbc.OdbcConnection("Driver={{Microsoft Access Driver (*.mdb, *.accdb)}};Dbq=$mdb_str;")
+$conn = New-Object System.Data.Odbc.OdbcConnection("Driver={{Microsoft Access Driver (*.mdb, *.accdb)}};Dbq={mdb_str};")
 $conn.Open()
 $tables = @($conn.GetSchema("Tables") | Where-Object {{ $_.TABLE_TYPE -eq "TABLE" }} | Select-Object -ExpandProperty TABLE_NAME)
 

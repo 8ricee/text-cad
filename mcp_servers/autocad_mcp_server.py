@@ -675,7 +675,7 @@ def tool_acade_draw_smart_wires_and_arrows(args: dict[str, Any]) -> dict[str, An
 
 
 def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
-    """Validate peripheral BLOCK column, insert real S7-1500 PLC modules from ace_plc.mdb, draw I/O wires, and insert peripheral blocks."""
+    """Insert real ACADE PLCIO blocks (HP1W--L header + HP1WA-D channels from iec-60617), wire I/O via c:wd_wire_quik, and insert peripheral blocks."""
     import csv as _csv
 
     csv_path = Path(args["csv_path"]).resolve()
@@ -693,7 +693,6 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
                 )
             rows.append(row)
 
-    # Group channels by (RACK, SLOT, CODE) to build real PLC modules + wired I/O channels
     modules: dict[tuple[str, str, str], list[dict[str, str]]] = {}
     for row in rows:
         key = (row.get("RACK", "0").strip(), row.get("SLOT", "2").strip(), row.get("CODE", "").strip())
@@ -701,45 +700,45 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
 
     lisp_parts: list[str] = []
     for mod_idx, ((rack, slot, code), ch_rows) in enumerate(modules.items()):
-        mx = 100.0 + mod_idx * 160.0
+        mx = 80.0 + mod_idx * 165.0
         my = 265.0
-        mod_h = max(35.0, len(ch_rows) * 18.0 + 16.0)
         mod_tag = f"-A1:S{slot}"
-        # Draw PLC module housing and insert parametric/terminal markers with TAG1, MFG, CAT, RACK, SLOT
+        # Insert real ACADE PLCIO module header block (HP1W--L in Libs\iec-60617)
         lisp_parts.append(
-            f'(entmake (list \'(0 . "LWPOLYLINE") \'(100 . "AcDbEntity") \'(8 . "SYMS") \'(100 . "AcDbPolyline") '
-            f'\'(90 . 4) \'(70 . 1) (list 10 {mx} {my - mod_h}) (list 10 {mx + 42.0} {my - mod_h}) '
-            f'(list 10 {mx + 42.0} {my}) (list 10 {mx} {my})))'
-        )
-        # Insert real PLC module header block (HP1W--L if available, else WD_M-compatible attributes)
-        lisp_parts.append(
-            f'(setq _pm (c:wd_insym2 "VCR1" \'({mx + 21.0} {my - 6.0} 0.0) 0.5 nil)) '
+            f'(setq _pm (c:wd_insym2 "HP1W--L" \'({mx} {my} 0.0) 1.0 nil)) '
             f'(if _pm (progn '
-            f'(c:wd_modattrval _pm "TAG1" {_lisp_str(mod_tag)} nil) '
+            f'(c:wd_modattrval _pm "TAGA_" {_lisp_str(mod_tag)} nil) '
             f'(c:wd_modattrval _pm "MFG" "SIEMENS" nil) '
             f'(c:wd_modattrval _pm "CAT" {_lisp_str(code)} nil) '
+            f'(c:wd_modattrval _pm "RACK" {_lisp_str(rack)} nil) '
+            f'(c:wd_modattrval _pm "SLOT" {_lisp_str(slot)} nil) '
             f'(c:wd_modattrval _pm "LOC" "+MAIN_PNL" nil) '
             f'(c:wd_modattrval _pm "INST" "=PLC1" nil) '
-            f'(c:wd_modattrval _pm "DESC1" {_lisp_str(f"RACK {rack} SLOT {slot}")} nil) '
             f'(entupd _pm)))'
         )
         for ch_idx, row in enumerate(ch_rows):
-            cy = my - 18.0 - ch_idx * 18.0
+            cy = my - 20.0 - ch_idx * 20.0
             addr = row.get("ADDRESS", "")
             tdesc = row.get("TERMDESC", "")
             wtype = row.get("WIRETYPE", "SIG_PLC_BU_0.5")
             blk = (row.get("BLOCK") or "").strip()
-            # 1. Draw I/O wire FIRST via c:wd_wire_quik so peripheral symbol breaks wire cleanly
+            # 1. Draw I/O wire FIRST via c:wd_wire_quik from PLC channel X1TERM01
             lisp_parts.append(
                 f'(setvar "CLAYER" {_lisp_str(wtype)}) '
-                f'(c:wd_wire_quik \'({mx + 42.0} {cy} 0.0) \'({mx + 135.0} {cy} 0.0) nil)'
+                f'(c:wd_wire_quik \'({mx + 25.0} {cy} 0.0) \'({mx + 135.0} {cy} 0.0) nil)'
             )
-            # Label PLC channel address + terminal
+            # 2. Insert real PLCIO channel block (HP1WA-D) ON the wire start
             lisp_parts.append(
-                f'(entmake (list \'(0 . "TEXT") \'(8 . "TAGS") \'(7 . "VN_ARIAL") '
-                f'(list 10 {mx + 3.0} {cy - 1.0} 0.0) \'(40 . 1.8) (cons 1 {_lisp_str(f"{tdesc} {addr}")})))'
+                f'(setq _pc (c:wd_insym2 "HP1WA-D" \'({mx} {cy} 0.0) 1.0 nil)) '
+                f'(if _pc (progn '
+                f'(c:wd_modattrval _pc "TAGA_" {_lisp_str(mod_tag)} nil) '
+                f'(c:wd_modattrval _pc "TERM_" {_lisp_str(tdesc)} nil) '
+                f'(c:wd_modattrval _pc "ADDR_" {_lisp_str(addr)} nil) '
+                f'(c:wd_modattrval _pc "DESC1" {_lisp_str(row.get("DESC1", ""))} nil) '
+                f'(c:wd_modattrval _pc "DESC2" {_lisp_str(row.get("DESC2", ""))} nil) '
+                f'(entupd _pc)))'
             )
-            # 2. Insert peripheral symbol ON the wire (skip if blank, e.g., Analog %IW64)
+            # 3. Insert peripheral symbol ON the wire (skip if blank, e.g., Analog %IW64)
             if blk:
                 lisp_parts.append(
                     f'(setq _pe (c:wd_insym2 {_lisp_str(blk)} \'({mx + 92.0} {cy} 0.0) 1.0 nil)) '
@@ -762,14 +761,14 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def tool_acade_sync_panel_footprints(args: dict[str, Any]) -> dict[str, Any]:
-    """Query COMP (PAR1_CHLD2='1' AND LOC IN ('+MAIN_PNL','+DOOR')) from Scratch .mdb and insert real .dwg footprints with VIA_WD_FP XDATA."""
+    """Query COMP (PAR1_CHLD2='1' AND LOC IN ('+MAIN_PNL','+DOOR')) from Scratch .mdb and insert real .dwg footprints at panel coordinates with VIA_WD_FP XDATA."""
     mdb_path = Path(args["mdb_path"]).resolve()
     if not mdb_path.exists():
         raise FileNotFoundError(f"Scratch database not found: {mdb_path}")
     mdb_str = str(mdb_path).replace("'", "''")
     ps = f"""
 $ErrorActionPreference = 'Stop'
-$conn = New-Object System.Data.Odbc.OdbcConnection("Driver={{Microsoft Access Driver (*.mdb, *.accdb)}};Dbq=$mdb_str;")
+$conn = New-Object System.Data.Odbc.OdbcConnection("Driver={{Microsoft Access Driver (*.mdb, *.accdb)}};Dbq={mdb_str};")
 $conn.Open()
 $cmd = $conn.CreateCommand()
 $cmd.CommandText = "SELECT TAGNAME, MFG, CAT, LOC, INST, DESC1 FROM [COMP] WHERE PAR1_CHLD2='1' AND LOC IN ('+MAIN_PNL','+DOOR') ORDER BY LOC, TAGNAME"
@@ -792,7 +791,32 @@ $conn.Close()
     res = _run_ps(ps, timeout=30)
     if args.get("run_aefootprint") and res.get("components"):
         panel_root = Path(r"F:\Projects\CAD\Libraries\AutoCAD-Electrical\2027\Libs\panel\CUSTOM")
-        ins_exprs = ['(regapp "VIA_WD_FP")', '(setq _ms (vla-get-ModelSpace (vla-get-ActiveDocument (vlax-get-acad-object))))']
+        # Real panel coordinates matching 800x1200mm enclosure (+MAIN_PNL at ox=1090, +DOOR at ox=0)
+        known_coords = {
+            "-Q1": (1202.0, 545.0),
+            "-F1": (1340.0, 567.0),
+            "-Q3": (1400.0, 565.0),
+            "-Q2": (1444.0, 561.0),
+            "-K1": (1502.0, 567.0),
+            "-U1": (1630.0, 512.0),
+            "-G1": (1214.0, 882.0),
+            "-A1": (1318.0, 871.0),
+            "-K_SAF1": (1542.0, 895.0),
+            "-A2": (1605.0, 890.0),
+            "-X0": (1214.0, 240.0),
+            "-X1": (1338.0, 245.0),
+            "-X3": (1372.0, 240.0),
+            "-S10": (580.0, 510.0),
+            "-H1": (165.0, 525.0),
+        }
+        ins_exprs = [
+            '(regapp "VIA_WD_FP")',
+            '(setq _ms (vla-get-ModelSpace (vla-get-ActiveDocument (vlax-get-acad-object))))',
+            # Draw 800x1200 door & 740x1140 mounting plate outlines in 1:1 mm Model Space
+            '(entmake \'((0 . "LWPOLYLINE") (100 . "AcDbEntity") (8 . "PNL_ENCLOSURE") (100 . "AcDbPolyline") (90 . 4) (70 . 1) (10 0.0 0.0) (10 800.0 0.0) (10 800.0 1200.0) (10 0.0 1200.0)))',
+            '(entmake \'((0 . "LWPOLYLINE") (100 . "AcDbEntity") (8 . "PNL_ENCLOSURE") (100 . "AcDbPolyline") (90 . 4) (70 . 1) (10 1090.0 0.0) (10 1890.0 0.0) (10 1890.0 1200.0) (10 1090.0 1200.0)))',
+            '(entmake \'((0 . "LWPOLYLINE") (100 . "AcDbEntity") (8 . "PNL_PLATE") (100 . "AcDbPolyline") (90 . 4) (70 . 1) (10 1120.0 30.0) (10 1860.0 30.0) (10 1860.0 1170.0) (10 1120.0 1170.0)))',
+        ]
         for idx, comp in enumerate(res["components"]):
             mfg = (comp.get("mfg") or "SIEMENS").upper()
             cat_raw = (comp.get("cat") or "").upper()
@@ -800,10 +824,14 @@ $conn.Close()
             dwg_path = panel_root / mfg / f"PNL_{mfg.replace(' ', '_')}_{cat_clean}.dwg"
             if not dwg_path.exists():
                 continue
-            x = 120.0 + (idx % 4) * 180.0
-            y = 920.0 - (idx // 4) * 260.0
             tag = comp.get("tag", "")
             loc = comp.get("loc", "+MAIN_PNL")
+            base_tag = tag.split(":")[0]
+            if base_tag in known_coords:
+                x, y = known_coords[base_tag]
+            else:
+                x = (120.0 if loc == "+DOOR" else 1200.0) + (idx % 4) * 140.0
+                y = 900.0 - (idx // 4) * 220.0
             ins_exprs.append(
                 f'(setq _vfp (vla-InsertBlock _ms (vlax-3d-point {x} {y} 0.0) {_lisp_str(str(dwg_path))} 1.0 1.0 1.0 0.0)) '
                 f'(setq _fp (vlax-vla-object->ename _vfp)) '
@@ -815,16 +843,32 @@ $conn.Close()
                 f'(entmod (append _fped (list (list -3 (list "VIA_WD_FP" (cons 1000 {_lisp_str(tag)}) (cons 1000 {_lisp_str(mfg)}) (cons 1000 {_lisp_str(cat_raw)})))))) '
                 f'(entupd _fp)'
             )
-        if len(ins_exprs) > 2:
+        if len(ins_exprs) > 5:
             _run_acade_lisp_checked(" ".join(ins_exprs), ["c:wd_modattrval"], auto_save=True, timeout_sec=45.0)
     return res
 
 
 def tool_acade_run_reports_and_retag(args: dict[str, Any]) -> dict[str, Any]:
-    """Run non-interactive AEREBUILDDB, c:wd_retag_update_noprompts, wire-number block tagging, and c:wd_tb_process_one (no modal DCL)."""
+    """Place non-modal WD_WNH/WD_WNV wire-number blocks on unnumbered wires, rebuild DB, retag, and update Title Block across sheets."""
     sheet_paths = args.get("sheet_paths") or []
+    # Non-modal wire numbering: scan LINEs on wire layers, insert WD_WNH/WD_WNV at midpoint if no WD_WN* nearby
+    wnum_lisp = (
+        '(setq _wss (ssget "X" \'((0 . "LINE") (8 . "PWR_*,CTRL_*,SIG_*,SAFE_*")))) '
+        '(if _wss (progn (setq _wi 0 _wn 1) (while (< _wi (sslength _wss)) '
+        '(setq _we (entget (ssname _wss _wi)) _p1 (cdr (assoc 10 _we)) _p2 (cdr (assoc 11 _we)) '
+        '_mx (/ (+ (car _p1) (car _p2)) 2.0) _my (/ (+ (cadr _p1) (cadr _p2)) 2.0) '
+        '_blk (if (> (abs (- (car _p2) (car _p1))) (abs (- (cadr _p2) (cadr _p1)))) "WD_WNH" "WD_WNV") '
+        '_sh (cond ((setq _ws (ssget "X" \'((0 . "INSERT") (2 . "WD_M")))) '
+        '(cdr (assoc 1 (entget (entnext (ssname _ws 0)))))) (T "01")) '
+        '_wno (strcat (if (< _wn 10) "0" "") (itoa _wn))) '
+        '(if (not (ssget "C" (list (- _mx 4.0) (- _my 4.0)) (list (+ _mx 4.0) (+ _my 4.0)) \'((0 . "INSERT") (2 . "WD_WN*")))) '
+        '(progn (setq _wb (c:wd_insym2 _blk (list _mx _my 0.0) 1.0 nil)) '
+        '(if _wb (progn (c:wd_modattrval _wb "WIRENO" _wno nil) (entupd _wb))) (setq _wn (1+ _wn)))) '
+        '(setq _wi (1+ _wi)))))'
+    )
     lisp_body = (
         '(setvar "FILEDIA" 0) '
+        f'{wnum_lisp} '
         '(command "_AEREBUILDDB") '
         '(c:wd_retag_update_noprompts 97 nil) '
         '(c:wd_tb_process_one 1 (list (list 1 1 1 1 1 1 1 1 0 0 1 1 1))) '
@@ -832,18 +876,91 @@ def tool_acade_run_reports_and_retag(args: dict[str, Any]) -> dict[str, Any]:
     )
     res = _run_acade_lisp_checked(
         lisp_body,
-        ["c:wd_retag_update_noprompts", "c:wd_tb_process_one"],
+        ["c:wd_insym2", "c:wd_modattrval", "c:wd_retag_update_noprompts", "c:wd_tb_process_one"],
         auto_save=bool(args.get("auto_save", True)),
     )
-    # Also update Title Block across all remaining sheets in .wdp if sheet_paths provided
     for sp in sheet_paths:
         tool_autocad_open_or_new({"path": sp})
         _run_acade_lisp_checked(
-            '(c:wd_tb_process_one 1 (list (list 1 1 1 1 1 1 1 1 0 0 1 1 1)))',
-            ["c:wd_tb_process_one"],
+            f'{wnum_lisp} (c:wd_tb_process_one 1 (list (list 1 1 1 1 1 1 1 1 0 0 1 1 1)))',
+            ["c:wd_insym2", "c:wd_modattrval", "c:wd_tb_process_one"],
             auto_save=True,
         )
     return res
+
+
+def tool_acade_place_db_reports_on_drawing(args: dict[str, Any]) -> dict[str, Any]:
+    """Query live Project Scratch .mdb (COMP, PNLCOMP, WFRM2ALL+WIRETYPE, PLCIO, TERMS) and place dynamic AcDbTable on active drawing."""
+    mdb_path = Path(args["mdb_path"]).resolve()
+    report_type = args.get("report_type", "BOM").upper()
+    insert_pt = args.get("insert") or [232.0, 280.0, 0.0]
+    if not mdb_path.exists():
+        raise FileNotFoundError(f"Scratch database not found: {mdb_path}")
+
+    mdb_str = str(mdb_path).replace("'", "''")
+    if report_type == "BOM":
+        sql = (
+            "SELECT TAGNAME, DESC1, MFG, CAT, COUNT(*) AS QTY, LOC "
+            "FROM [COMP] WHERE PAR1_CHLD2='1' AND TAGNAME IS NOT NULL AND TAGNAME<>'' "
+            "GROUP BY TAGNAME, DESC1, MFG, CAT, LOC ORDER BY LOC, TAGNAME"
+        )
+        headers = ["TAG", "DESCRIPTION", "MFG", "CATALOG NO.", "QTY", "LOC"]
+    elif report_type == "WIRE_FROM_TO":
+        sql = (
+            "SELECT w.WIRENO, w.NAM1, w.PIN1, w.NAM2, w.PIN2, w.WLAY1 "
+            "FROM [WFRM2ALL] w ORDER BY w.WIRENO"
+        )
+        headers = ["WIRE NO", "FROM TAG", "PIN1", "TO TAG", "PIN2", "WIRE LAYER"]
+    elif report_type == "PLCIO":
+        sql = "SELECT TAGNAME, ADDR, TERM, TERMDESC, DESCA FROM [PLCIO] ORDER BY TAGNAME, ADDR"
+        headers = ["PLC TAG", "ADDRESS", "TERM", "TERMDESC", "DESCRIPTION"]
+    elif report_type == "TERMINAL_PLAN":
+        sql = "SELECT TAGSTRIP, TERM, WIRENO, LOC, INST FROM [TERMS] ORDER BY TAGSTRIP, TERM"
+        headers = ["STRIP", "TERM", "WIRE NO", "LOC", "INST"]
+    else:
+        raise ValueError(f"Unsupported report_type: {report_type}")
+
+    ps = f"""
+$conn = New-Object System.Data.Odbc.OdbcConnection("Driver={{Microsoft Access Driver (*.mdb, *.accdb)}};Dbq={mdb_str};")
+$conn.Open()
+$cmd = $conn.CreateCommand()
+$cmd.CommandText = "{sql}"
+$r = $cmd.ExecuteReader()
+$rows = @()
+while ($r.Read()) {{
+    $row = @()
+    for ($i = 0; $i -lt $r.FieldCount; $i++) {{
+        $v = $r.GetValue($i)
+        $row += if ($v -is [DBNull]) {{ "" }} else {{ [string]$v }}
+    }}
+    $rows += ,$row
+}}
+$r.Close()
+$conn.Close()
+@{{ rows = $rows }} | ConvertTo-Json -Depth 4 -Compress
+"""
+    data_res = _run_ps(ps, timeout=30)
+    db_rows = data_res.get("rows") or []
+    table_data = [headers] + db_rows
+    if len(table_data) == 1:
+        return {"report_type": report_type, "rows": 0, "placed": False}
+
+    draw_res = tool_autocad_draw_entities({
+        "space": args.get("space", "ModelSpace"),
+        "zoom_extents": False,
+        "auto_save": bool(args.get("auto_save", True)),
+        "entities": [{
+            "type": "table",
+            "layer": "GRID_TABLE",
+            "insert": insert_pt,
+            "rows": len(table_data),
+            "cols": len(headers),
+            "row_height": 6.0,
+            "col_width": 32.0,
+            "data": table_data,
+        }],
+    })
+    return {"report_type": report_type, "rows": len(db_rows), "placed": True, "draw": draw_res}
 
 
 def tool_acade_electrical_audit(args: dict[str, Any]) -> dict[str, Any]:
@@ -1042,6 +1159,21 @@ TOOLS = [
         },
     },
     {
+        "name": "acade_place_db_reports_on_drawing",
+        "description": "Query live Project Scratch .mdb (COMP, WFRM2ALL, PLCIO, TERMS) and place dynamic AcDbTable reports (BOM, WIRE_FROM_TO, PLCIO, TERMINAL_PLAN) with zero modal DCL dialogs.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mdb_path": {"type": "string"},
+                "report_type": {"type": "string", "enum": ["BOM", "WIRE_FROM_TO", "PLCIO", "TERMINAL_PLAN"], "default": "BOM"},
+                "insert": {"type": "array", "items": {"type": "number"}},
+                "space": {"type": "string", "enum": ["ModelSpace", "PaperSpace"], "default": "ModelSpace"},
+                "auto_save": {"type": "boolean", "default": True},
+            },
+            "required": ["mdb_path"],
+        },
+    },
+    {
         "name": "acade_electrical_audit",
         "description": "Gatekeeper audit on ACADE Project Scratch .mdb (missing catalog, duplicate tags, orphaned child contacts, bogus wires, schematic vs panel discrepancy).",
         "inputSchema": {
@@ -1068,6 +1200,7 @@ HANDLERS = {
     "acade_build_plc_from_csv": tool_acade_build_plc_from_csv,
     "acade_sync_panel_footprints": tool_acade_sync_panel_footprints,
     "acade_run_reports_and_retag": tool_acade_run_reports_and_retag,
+    "acade_place_db_reports_on_drawing": tool_acade_place_db_reports_on_drawing,
     "acade_electrical_audit": tool_acade_electrical_audit,
 }
 

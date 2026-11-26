@@ -143,10 +143,11 @@ Khi thực hiện thiết kế, tính toán hoặc kiểm tra từng loại tủ
        1. **`acade_project_init`**: Sinh `.wdp` chuẩn IEC-60617, khởi tạo bộ `.dwg` từ `TEMPLATE_IEC_A3.dwt`, kích hoạt dự án (`_AEOPENPROJECT` / `c:ace_add_dwg_to_project`) và chạy `_AEREBUILDDB` tạo Project Scratch Database `<project>.mdb`.
        2. **`acade_insert_schematic_symbol`**: Gọi `(c:wd_insym2)` chèn symbol thật từ `Libs\iec-60617\` (tự cắt dây `AEWIRE` tại chân `X?TERM??`) và `(c:wd_modattrval)` gán `MFG`, `CAT`, `LOC`, `INST`, `DESC1..3`, `TAGSTRIP`/`TERM01`.
        3. **`acade_draw_smart_wires_and_arrows`**: Vẽ dây thông minh qua `(c:wd_wire_quik)`, đặt `WDDOT` tại ngã rẽ T và chèn cặp `Source/Destination Signal Arrows` (`HA1S1` / `HA1D3`) theo `SIGCODE`.
-       4. **`acade_build_plc_from_csv`**: Chạy tự động PLC I/O không hộp thoại (`c:wd_inplc_nd`) sinh trọn bộ trang PLC I/O từ file CSV đồng bộ TIA Portal.
-       5. **`acade_sync_panel_footprints`**: Truy vấn thiết bị `+MAIN_PNL` & `+DOOR` từ Scratch DB `.mdb` (`COMP` với `PAR1_CHLD2='1'`), chèn Panel Footprint `.dwg` 1:1 qua `footprint_lookup.mdb` (`P_TAG1`), thanh `AEDINRAIL` và `AEBALLOON`.
-       6. **`acade_run_reports_and_retag`**: Chạy tự động chuỗi `c:wd_retag_update_noprompts` → `AEWIRENO` → `c:wd_tb_process_one` (điền khung tên và `SHEET %S OF %N`) → `AEREPORTGROUP` với [templates/project_master_reports.rgf](templates/project_master_reports.rgf).
-       7. **`acade_electrical_audit`**: Thực thi Gatekeeper Fail-Closed kiểm toán trực tiếp trên Project Scratch Database `<project>.mdb` (`COMP`, `PNLCOMP`, `WIRE_ERR`, `WFRM2ALL`) + `AEAUDIT`.
+       4. **`acade_build_plc_from_csv`**: Chèn block `PLCIO` thật (`HP1W--L` + `HP1WA-D` từ `Libs\iec-60617\`), nối dây `c:wd_wire_quik` và thả linh kiện ngoại vi (`VCR1`, `VPB11`, `VLT1A`, `VSW12`) lên dây.
+       5. **`acade_sync_panel_footprints`**: Truy vấn thiết bị `+MAIN_PNL` & `+DOOR` từ Scratch DB `.mdb` (`COMP` với `PAR1_CHLD2='1'`), chèn Panel Footprint `.dwg` tại tọa độ thực tế trong vỏ tủ kèm XDATA `VIA_WD_FP`.
+       6. **`acade_run_reports_and_retag`**: Gắn block số dây `WD_WNH`/`WD_WNV` không hộp thoại, chạy `_AEREBUILDDB` → `c:wd_retag_update_noprompts` → lặp `c:wd_tb_process_one` qua mọi trang `.dwg`.
+       7. **`acade_place_db_reports_on_drawing`**: Truy vấn trực tiếp Scratch `.mdb` (`COMP`, `WFRM2ALL`, `PLCIO`, `TERMS`) đặt bảng `AcDbTable` động (`BOM`, `WIRE_FROM_TO`, `PLCIO`, `TERMINAL_PLAN`) lên bản vẽ không vướng hộp thoại DCL.
+       8. **`acade_electrical_audit`**: Thực thi Gatekeeper Fail-Closed kiểm toán trực tiếp trên Project Scratch Database `<project>.mdb` (`COMP`, `PNLCOMP`, `WIRE_ERR`, `WFRM2ALL`).
    - **Bắt buộc cấu hình Font TrueType Unicode (`arial.ttf`, `isocpeur.ttf` hoặc `tahoma.ttf`) trên chuẩn `R2018 (UTF-8)`** cho Textstyle `Standard` / `WD_IEC` / `VN_ARIAL` (cấm để `txt.shx` gây lỗi `?` Tiếng Việt).
    - Ánh xạ Title Block bằng mẫu [templates/default_iec_bilingual.wdt](templates/default_iec_bilingual.wdt), chạy **`Title Block Update` (`AEUPDATETITLEBLOCK`)** đồng bộ toàn dự án và xuất gộp bằng **Publish → Plot Project to PDF**.
 
