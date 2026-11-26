@@ -1,28 +1,8 @@
 * AutoCAD Electrical Automatic Reports Grouping File (.rgf)
-* Used by AEREPORTGROUP to update project-wide BOM, Wire From/To, Cable, and Terminal reports
-[REPORT_1]
-REPORT=BOM
-SCOPE=PROJECT
-FORMAT_FILE=panel_bom_bilingual.set
-OUTPUT=DRAWING
-
-[REPORT_2]
-REPORT=MISSING_CAT
-SCOPE=PROJECT
-OUTPUT=CSV
-OUT_FILE=reports/missing_catalog_audit.csv
-
-[REPORT_3]
-REPORT=WIRE_FROM_TO
-SCOPE=PROJECT
-OUTPUT=DRAWING
-
-[REPORT_4]
-REPORT=CABLE_SUMMARY
-SCOPE=PROJECT
-OUTPUT=DRAWING
-
-[REPORT_5]
-REPORT=TERMINAL_PLAN
-SCOPE=PROJECT
-OUTPUT=DRAWING
+* Configure/regenerate via Reports -> Automatic Reports -> Save Report Group
+* Each line: <ReportType>,<FormatSetFile>,<OutputMode(DRAWING|FILE)>,<Scope(PROJECT|ACTIVE)>,<OutFileOrEmpty>
+Bill of Materials,panel_bom_bilingual.set,DRAWING,PROJECT,
+Missing Catalog Data,,FILE,PROJECT,reports/missing_catalog_audit.csv
+Wire From/To,,DRAWING,PROJECT,
+Cable Summary,,DRAWING,PROJECT,
+Terminal Plan,,DRAWING,PROJECT,

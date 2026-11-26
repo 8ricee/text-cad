@@ -83,14 +83,14 @@ Khi thực hiện thiết kế, tính toán hoặc kiểm tra từng loại tủ
 
 ## 4. Quy chuẩn Vẽ dây, Cáp nhiều lõi, Tín hiệu Xuyên trang & PLC I/O
 
-1. **Lệnh Wire (`AEWIRE`) & Đăng ký Wire Type (`AEWIRETYPE` / `c:wd_put_wnet_lay`)**: Bắt buộc vẽ dây qua lệnh/API dây của ACADE trên Layer đã đăng ký trong block `WD_M` (`VIA_WD_*` XDATA, đủ **`Color`** + **`Size`**, VD: `PWR_L1_BK_2.5`, `CTRL_24VDC_DBU_0.75`; dây `PE` vẽ nét liền `CONTINUOUS`) theo [references/cad-layers-and-colors.md](references/cad-layers-and-colors.md). **Cấm dùng `LINE`/`LWPOLYLINE` không đăng ký Wire Layer, và cấm vẽ dây đâm xuyên thủng qua cầu chì/thiết bị mà không ngắt tại chân `X?TERM??` (`Break Wire`).**
+1. **Lệnh Wire (`AEWIRE` / `c:wd_wire_quik`) & Đăng ký Wire Type (`AEWIRETYPE`)**: Bắt buộc vẽ dây qua lệnh/API dây của ACADE trên Layer đã khai báo trong `WD_M` (`WIRELAYS=PWR_*,CTRL_*,SIG_*,SAFE_*`, đủ **`Color`** + **`Size`**, VD: `PWR_L1_BK_2.5`, `CTRL_24VDC_DBU_0.75`; dây `PE` vẽ nét liền `CONTINUOUS`) theo [references/cad-layers-and-colors.md](references/cad-layers-and-colors.md). **Cấm dùng `LINE`/`LWPOLYLINE` thường, và cấm vẽ dây đâm xuyên thủng qua cầu chì/thiết bị mà không ngắt tại chân `X?TERM??` (`Break Wire` / `c:wd_trimwire`).**
 2. **Định dạng Đánh số dây (`AEWIRENO` / Block `WD_WN*`) & Điểm nối nhánh (`WD_DOT`)**:
    - Đánh số dây tự động bằng lệnh **`AEWIRENO`** (sinh block `WD_WN*`, **cấm gõ số dây bằng `TEXT` tĩnh**) theo định dạng Trang + Số thứ tự (`%S%N` hoặc `%S.%N`, VD: `0401`, `0402`).
    - Dùng **Fixed Wire Numbers** cho các thanh nguồn chung xuyên trang (`L1`, `L2`, `L3`, `N`, `PE`, `+24VDC`, `0VDC`, `L_220VAC`, `N_220VAC`). Mọi ngã ba đấu nối bắt buộc chèn block **`WD_DOT`** hoặc **Angled Tee**.
 3. **Cáp nhiều lõi & Giáp chống nhiễu (`Cable Markers` – `AEMARKER` & `AESHIELD`)**:
    - Gắn Cable Marker (`-W1`, `-W2`) cho cáp động lực và cáp điều khiển đi từ cầu đấu tủ ra thiết bị ngoài hiện trường (`+FIELD`) để xuất **Cable From/To Report**.
    - Dùng ký hiệu **Shield (`AESHIELD`)** cho cáp bọc giáp; tuân thủ nghiêm ngặt quy tắc **nối đất giáp 2 đầu $360^\circ$ cho cáp động cơ VFD** vs **nối đất giáp 1 đầu duy nhất tại tủ cho cáp Analog `4–20mA` / Load cell / RS-485** (tránh Ground Loop) theo [references/control-and-lighting-panels.md](references/control-and-lighting-panels.md).
-4. **Liên kết xuyên trang**: Bắt buộc chèn cặp **Source Arrow (`AESRCARROW` / `c:wd_ins_sig_src`)** và **Destination Arrow (`AEDESTARROW` / `c:wd_ins_sig_dst`)** khớp `SIGCODE` (cấm vẽ thanh nguồn cụt 2 đầu chỉ ghi `TEXT`).
+4. **Liên kết xuyên trang**: Bắt buộc chèn cặp **Source Arrow (`HA1S1` / `AESRCARROW`)** và **Destination Arrow (`HA1D3` / `AEDESTARROW`)** khớp `SIGCODE` (cấm vẽ thanh nguồn cụt 2 đầu chỉ ghi `TEXT`).
 5. **PLC I/O, Tín hiệu Tinh xảo (Load cell, Encoder, 4–20mA) & Mạng Truyền thông (`PROFINET`, `Modbus RTU`)**:
    - Với S7-1500: `Slot 0` = PS, `Slot 1` = CPU, module I/O bắt đầu từ **`Slot 2`**; mã module phải tồn tại trong **`ace_plc.mdb`** (nạp trước bằng [scripts/seed_acade_databases.py](scripts/seed_acade_databases.py)). Mạch dừng khẩn `E-STOP` 2 kênh qua **Safety Relay** hoặc module **F-DI (`PROFIsafe` dùng nguồn xung kiểm tra `VS0/VS1`)** theo [templates/plc_io_import_template.csv](templates/plc_io_import_template.csv).
    - Trong file CSV của **`Spreadsheet to PLC I/O Utility`** (`AEPLCIO`, ánh xạ `BLK_NAME = B`), cột **`BLOCK`** phải là **tên symbol thiết bị ngoại vi thật trong `Libs\iec-60617`** (VD: `VSW11`, `VSW12`, `VLT1A`, `VCR1`, `VY1`, `VPX1`...) hoặc để trống cho đầu dây chờ — **tuyệt đối không điền tên giả của module PLC** (`PLC_DI_16`...) vào cột `BLOCK`.
@@ -140,13 +140,13 @@ Khi thực hiện thiết kế, tính toán hoặc kiểm tra từng loại tủ
    - **Khởi tạo & Dựng mạch 100% Native Database (`.wdp` + `.dwg` + Scratch `.mdb`):**
      - Mọi bản vẽ điện quản lý bằng định dạng **`.dwg`** nằm trong file dự án **`.wdp`** (copy từ [templates/TEMPLATE_IEC_A3.dwt](templates/TEMPLATE_IEC_A3.dwt) đã nhúng sẵn `WD_M` và `TITLE_BLOCK_A3_BILINGUAL`).
      - Sử dụng trực tiếp bộ tool chuyên biệt của MCP **`autocad-direct`** gọi thẳng AutoLISP API gốc của AutoCAD Electrical (nạp qua `wdload.lsp` → `(c:wd_load)`):
-       1. **`acade_project_init`**: Sinh `.wdp` chuẩn IEC-60617, khởi tạo bộ `.dwg` từ `TEMPLATE_IEC_A3.dwt`, kích hoạt dự án và chạy `(c:wd_mdb_rebuild)` tạo Project Scratch Database `<project>.mdb`.
+       1. **`acade_project_init`**: Sinh `.wdp` chuẩn IEC-60617, khởi tạo bộ `.dwg` từ `TEMPLATE_IEC_A3.dwt`, kích hoạt dự án (`_AEOPENPROJECT` / `c:ace_add_dwg_to_project`) và chạy `_AEREBUILDDB` tạo Project Scratch Database `<project>.mdb`.
        2. **`acade_insert_schematic_symbol`**: Gọi `(c:wd_insym2)` chèn symbol thật từ `Libs\iec-60617\` (tự cắt dây `AEWIRE` tại chân `X?TERM??`) và `(c:wd_modattrval)` gán `MFG`, `CAT`, `LOC`, `INST`, `DESC1..3`, `TAGSTRIP`/`TERM01`.
-       3. **`acade_draw_smart_wires_and_arrows`**: Đăng ký Wire Layer vào `WD_M` (`c:wd_put_wnet_lay`), vẽ dây thông minh, đặt `WD_DOT` tại ngã rẽ T và chèn cặp `Source/Destination Signal Arrows` (`c:wd_ins_sig_src` / `c:wd_ins_sig_dst`).
-       4. **`acade_build_plc_from_csv`**: Chạy tự động `Spreadsheet to PLC I/O` (`wdio` với `.wdi` chuẩn) sinh trọn bộ trang PLC I/O từ file CSV đồng bộ TIA Portal.
-       5. **`acade_sync_panel_footprints`**: Truy vấn thiết bị `+MAIN_PNL` & `+DOOR` từ Scratch DB `.mdb`, chèn Panel Footprint 1:1 qua `footprint_lookup.mdb` (`P_TAG1`), thanh `AEDINRAIL` và `AEBALLOON`.
-       6. **`acade_run_reports_and_retag`**: Chạy tự động chuỗi `AERETAG` (cập nhật Tag, số dây `AEWIRENO`, `Graphical Cross-Ref`) → `AEUPDATETITLEBLOCK` (điền khung tên và `SHEET %S OF %N` từ `.wdp`) → `AEREPORTGROUP` với [templates/project_master_reports.rgf](templates/project_master_reports.rgf).
-       7. **`acade_electrical_audit`**: Thực thi Gatekeeper kiểm toán trực tiếp trên Project Scratch Database `<project>.mdb` + `AEAUDIT`/`AEDWGAUDIT`.
+       3. **`acade_draw_smart_wires_and_arrows`**: Vẽ dây thông minh qua `(c:wd_wire_quik)`, đặt `WDDOT` tại ngã rẽ T và chèn cặp `Source/Destination Signal Arrows` (`HA1S1` / `HA1D3`) theo `SIGCODE`.
+       4. **`acade_build_plc_from_csv`**: Chạy tự động PLC I/O không hộp thoại (`c:wd_inplc_nd`) sinh trọn bộ trang PLC I/O từ file CSV đồng bộ TIA Portal.
+       5. **`acade_sync_panel_footprints`**: Truy vấn thiết bị `+MAIN_PNL` & `+DOOR` từ Scratch DB `.mdb` (`COMP` với `PAR1_CHLD2='1'`), chèn Panel Footprint `.dwg` 1:1 qua `footprint_lookup.mdb` (`P_TAG1`), thanh `AEDINRAIL` và `AEBALLOON`.
+       6. **`acade_run_reports_and_retag`**: Chạy tự động chuỗi `c:wd_retag_update_noprompts` → `AEWIRENO` → `c:wd_tb_process_one` (điền khung tên và `SHEET %S OF %N`) → `AEREPORTGROUP` với [templates/project_master_reports.rgf](templates/project_master_reports.rgf).
+       7. **`acade_electrical_audit`**: Thực thi Gatekeeper Fail-Closed kiểm toán trực tiếp trên Project Scratch Database `<project>.mdb` (`COMP`, `PNLCOMP`, `WIRE_ERR`, `WFRM2ALL`) + `AEAUDIT`.
    - **Bắt buộc cấu hình Font TrueType Unicode (`arial.ttf`, `isocpeur.ttf` hoặc `tahoma.ttf`) trên chuẩn `R2018 (UTF-8)`** cho Textstyle `Standard` / `WD_IEC` / `VN_ARIAL` (cấm để `txt.shx` gây lỗi `?` Tiếng Việt).
    - Ánh xạ Title Block bằng mẫu [templates/default_iec_bilingual.wdt](templates/default_iec_bilingual.wdt), chạy **`Title Block Update` (`AEUPDATETITLEBLOCK`)** đồng bộ toàn dự án và xuất gộp bằng **Publish → Plot Project to PDF**.
 
@@ -156,8 +156,8 @@ Khi thực hiện thiết kế, tính toán hoặc kiểm tra từng loại tủ
 
 1. **Quản trị & Nạp tự động Cơ sở dữ liệu (`seed_acade_databases.py` & `AECATALOG`)**:
    - Trước khi dựng mạch, chạy [scripts/seed_acade_databases.py](scripts/seed_acade_databases.py) để nạp tự động dữ liệu `MFG` (viết IN HOA 100%), `CAT`, `_PINLIST` (Form C `4,...`), `ASSYCODE` vào `default_cat.mdb`, ánh xạ Footprint vào `footprint_lookup.mdb`, và mã module Siemens S7-1500/S7-1200 vào `ace_plc.mdb`.
-2. **Gatekeeper Kiểm toán Điện Bắt buộc (`acade_electrical_audit` — Chặn cứng Fail Build nếu vi phạm)**:
-   - Cuối mọi dự án, bắt buộc chạy `acade_electrical_audit` (hoặc [scripts/acade_electrical_audit.py](scripts/acade_electrical_audit.py)) truy vấn trực tiếp các bảng của **Project Scratch Database (`<project>.mdb`: `COMP`, `TERMS`, `WIRENO`, `XREF`, `PNLCOMP`)** kết hợp `AEAUDIT` / `AEDWGAUDIT`, chặn cứng xuất bản nếu bất kỳ chỉ số nào `> 0`:
+2. **Gatekeeper Kiểm toán Điện Bắt buộc (`acade_electrical_audit` — Fail-Closed nếu vi phạm)**:
+   - Cuối mọi dự án, bắt buộc chạy `acade_electrical_audit` (hoặc [scripts/acade_electrical_audit.py](scripts/acade_electrical_audit.py)) truy vấn trực tiếp các bảng của **Project Scratch Database (`<project>.mdb`: `COMP`, `PNLCOMP`, `WIRE_ERR`, `WFRM2ALL`)** kết hợp `AEAUDIT`, chặn cứng xuất bản nếu `COMP` rỗng hoặc bất kỳ chỉ số nào `> 0`:
      - **`Bogus Wires / Unconnected Wire Stubs > 0`** (Dây hở hoặc vẽ `LINE` không bắt vào chân `X?TERM??`).
      - **`Orphaned Child Contacts > 0` hoặc `Pinlist Overflow > 0`** (Tiếp điểm `Child` không có cuộn dây `Parent`, hoặc vượt số tiếp điểm khai báo trong `_PINLIST`).
      - **`Duplicate Component Tags > 0`** (Trùng mã `TAG` trong cùng `INST + LOC`).

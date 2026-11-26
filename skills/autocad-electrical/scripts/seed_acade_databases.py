@@ -155,30 +155,88 @@ Write-Output $applied
     return {"catalog_rows": len(rows), "sql_statements": applied}
 
 
-def _build_panel_footprint_dxf_if_missing(panel_dir: Path, mfg: str, blknam: str, w_mm: float, h_mm: float, cat: str) -> Path:
-    """Create a real 1:1 mm Smart Panel Footprint DXF with P_TAG1/MFG/CAT/LOC/ASSYCODE attributes so BLKNAM exists on disk."""
+def convert_dxf_to_dwg(dxf_path: Path, dwg_path: Path) -> Path:
+    """Convert a DXF file to native AutoCAD .dwg using accoreconsole.exe."""
+    accore = Path(r"C:\Program Files\Autodesk\AutoCAD 2027\accoreconsole.exe")
+    if not accore.exists():
+        raise FileNotFoundError(f"accoreconsole.exe not found: {accore}")
+    scr = dxf_path.with_suffix(".scr")
+    dwg_posix = dwg_path.as_posix()
+    scr.write_text(f'(setvar "FILEDIA" 0)\n(setvar "EXPERT" 5)\n_.SAVEAS\n2018\n{dwg_posix}\n_QUIT _Y\n', encoding="ascii")
+    proc = subprocess.run([str(accore), "/i", str(dxf_path), "/s", str(scr), "/l", "en-US"], capture_output=True, text=True, timeout=30)
+    scr.unlink(missing_ok=True)
+    if proc.returncode != 0 or not dwg_path.exists():
+        raise RuntimeError(f"Failed converting {dxf_path.name} -> .dwg (rc={proc.returncode})")
+    return dwg_path
+
+
+def _build_panel_footprint_dwg_if_missing(panel_dir: Path, mfg: str, blknam: str, row: dict[str, str]) -> Path:
+    """Create a 5-detail 1:1 mm Smart Panel Footprint .dwg (outer body, bezel, terminals, screw holes, DIN/base mount + P_TAG1)."""
     import ezdxf
+
+    w_mm = float(row.get("W_MM", "0") or 0)
+    h_mm = float(row.get("H_MM", "0") or 0)
+    cat = _sql_esc(row.get("CAT", "").upper())
+    mnt = (row.get("MOUNT_TYPE", "") or "DIN_TS35").strip().upper()
+    hole_dx = float(row.get("HOLE_DX_MM", "0") or 0)
+    hole_dy = float(row.get("HOLE_DY_MM", "0") or 0)
+    hole_dia = float(row.get("HOLE_DIA_MM", "0") or 0)
+    esc_w = float(row.get("ESCUTCHEON_W_MM", "0") or 0)
+    esc_h = float(row.get("ESCUTCHEON_H_MM", "0") or 0)
 
     out_dir = panel_dir / "CUSTOM" / mfg
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{blknam}.dxf"
-    if not out_path.exists():
-        doc = ezdxf.new("R2018", setup=True)
-        doc.header["$INSUNITS"] = 4
-        doc.header["$MEASUREMENT"] = 1
-        msp = doc.modelspace()
-        msp.add_lwpolyline([(0, 0), (w_mm, 0), (w_mm, h_mm), (0, h_mm), (0, 0)])
-        msp.add_attdef("P_TAG1", insert=(2.0, h_mm - 5.0), text="", height=3.0)
-        msp.add_attdef("MFG", insert=(2.0, 2.0), text=mfg, height=2.0, dxfattribs={"flags": 1})
-        msp.add_attdef("CAT", insert=(2.0, 5.0), text=cat, height=2.0, dxfattribs={"flags": 1})
-        msp.add_attdef("LOC", insert=(2.0, 8.0), text="+MAIN_PNL", height=2.0, dxfattribs={"flags": 1})
-        msp.add_attdef("ASSYCODE", insert=(2.0, 11.0), text="", height=2.0, dxfattribs={"flags": 1})
-        doc.saveas(out_path)
-    return out_path
+    out_dwg = out_dir / f"{blknam}.dwg"
+    old_dxf = out_dir / f"{blknam}.dxf"
+    if old_dxf.exists():
+        old_dxf.unlink()
+    if out_dwg.exists():
+        return out_dwg
+
+    tmp_dxf = out_dir / f"{blknam}_tmp.dxf"
+    doc = ezdxf.new("R2018", setup=True)
+    doc.header["$INSUNITS"] = 4
+    doc.header["$MEASUREMENT"] = 1
+    msp = doc.modelspace()
+
+    # 1. Outer body outline
+    msp.add_lwpolyline([(0, 0), (w_mm, 0), (w_mm, h_mm), (0, h_mm), (0, 0)])
+    # 2. Inner bezel / escutcheon collar
+    bw = esc_w if esc_w > 0 else max(6.0, w_mm - 6.0)
+    bh = esc_h if esc_h > 0 else max(10.0, h_mm * 0.56)
+    bx0, by0 = (w_mm - bw) / 2.0, (h_mm - bh) / 2.0
+    msp.add_lwpolyline([(bx0, by0), (bx0 + bw, by0), (bx0 + bw, by0 + bh), (bx0, by0 + bh), (bx0, by0)])
+    # 3. Top & bottom terminal cavities + screw circles
+    n_poles = max(2, min(6, int(round(w_mm / 18.0))))
+    step_x = (w_mm - 8.0) / n_poles
+    for i in range(n_poles):
+        tx = 4.0 + (i + 0.5) * step_x
+        msp.add_circle((tx, h_mm - 6.0), radius=2.4)
+        msp.add_circle((tx, 6.0), radius=2.4)
+    # 4. Mounting screw holes (Base-mounted) or 5. DIN rail latch tabs
+    if mnt in ("BASE", "DOOR") and hole_dx > 0 and hole_dy > 0:
+        r_h = max(1.5, hole_dia / 2.0)
+        cx, cy = w_mm / 2.0, h_mm / 2.0
+        for hx in (cx - hole_dx / 2.0, cx + hole_dx / 2.0):
+            for hy in (cy - hole_dy / 2.0, cy + hole_dy / 2.0):
+                msp.add_circle((hx, hy), radius=r_h)
+    else:
+        msp.add_lwpolyline([(w_mm / 2 - 6, h_mm), (w_mm / 2 + 6, h_mm), (w_mm / 2 + 6, h_mm + 4), (w_mm / 2 - 6, h_mm + 4), (w_mm / 2 - 6, h_mm)])
+        msp.add_lwpolyline([(w_mm / 2 - 6, 0), (w_mm / 2 + 6, 0), (w_mm / 2 + 6, -4), (w_mm / 2 - 6, -4), (w_mm / 2 - 6, 0)])
+
+    msp.add_attdef("P_TAG1", insert=(2.0, h_mm - 5.0), text="", height=3.0)
+    msp.add_attdef("MFG", insert=(2.0, 2.0), text=mfg, height=2.0, dxfattribs={"flags": 1})
+    msp.add_attdef("CAT", insert=(2.0, 5.0), text=cat, height=2.0, dxfattribs={"flags": 1})
+    msp.add_attdef("LOC", insert=(2.0, 8.0), text="+MAIN_PNL", height=2.0, dxfattribs={"flags": 1})
+    msp.add_attdef("ASSYCODE", insert=(2.0, 11.0), text="", height=2.0, dxfattribs={"flags": 1})
+    doc.saveas(tmp_dxf)
+    convert_dxf_to_dwg(tmp_dxf, out_dwg)
+    tmp_dxf.unlink(missing_ok=True)
+    return out_dwg
 
 
 def seed_footprint_mdb(fp_mdb: Path, fp_csv: Path, panel_dir: Path) -> dict[str, int]:
-    """Upsert verified_footprints_catalog.csv entries into footprint_lookup.mdb and ensure footprint files exist on disk."""
+    """Upsert verified_footprints_catalog.csv entries into footprint_lookup.mdb and ensure real .dwg footprint blocks exist."""
     backup_mdb(fp_mdb)
     with fp_csv.open("r", encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
@@ -193,7 +251,7 @@ def seed_footprint_mdb(fp_mdb: Path, fp_csv: Path, panel_dir: Path) -> dict[str,
         if not mfg or not cat:
             continue
         blknam = _sql_esc(f"PNL_{mfg}_{cat}".replace("-", "_"))
-        _build_panel_footprint_dxf_if_missing(panel_dir, mfg, blknam, w, h, cat)
+        _build_panel_footprint_dwg_if_missing(panel_dir, mfg, blknam, row)
         rel_blk = _sql_esc(f"CUSTOM/{mfg}/{blknam}")
         desc = _sql_esc(f"{w}x{h}mm {mnt}")
         statements.append(f"DELETE FROM [{mfg}] WHERE CATALOG='{cat}'")

@@ -796,17 +796,17 @@ def build_custom_symbol_va1_weigh_trans() -> Path:
         msp.add_attdef(f"X1TERM{idx}", insert=(74, y), text="", height=1.0, dxfattribs={"layer": "SYMS", "style": "VN_ARIAL"})
         msp.add_attdef(f"TERM{idx}", insert=(50, y + 1), text=tdesc, height=1.9, dxfattribs={"layer": "TAGS", "style": "VN_ARIAL"})
 
-    return save_dxf_safely(doc, DXF_DIR / "VA1_WEIGH_TRANS.dxf")
+    dxf_out = save_dxf_safely(doc, DXF_DIR / "VA1_WEIGH_TRANS.dxf")
+    iec_lib = Path(r"F:\Projects\CAD\Libraries\AutoCAD-Electrical\2027\Libs\iec-60617")
+    if iec_lib.exists():
+        from seed_acade_databases import convert_dxf_to_dwg
+
+        return convert_dxf_to_dwg(dxf_out, iec_lib / "VA1_WEIGH_TRANS.dwg")
+    return dxf_out
 
 
 def build_native_acade_project_manifest(project_dir: Path, project_name: str = "conveyor_weighing_station") -> dict:
-    """Build the native ACADE .wdp/.dwg execution manifest (1:1 IEC-60617 symbols, smart wires, AEPLCIO, .rgf, and MDB Gatekeeper).
-
-    Replaces legacy ezdxf schematic mocking (ACADE_DEV_*, hardcoded wire/BOM tables, fake XML .emx).
-    Execute via autocad-direct MCP tools (acade_project_init -> acade_insert_schematic_symbol ->
-    acade_draw_smart_wires_and_arrows -> acade_build_plc_from_csv -> acade_sync_panel_footprints ->
-    acade_run_reports_and_retag -> acade_electrical_audit).
-    """
+    """Build the native ACADE .wdp/.dwg execution manifest (3-phase Parent/Child, smart wires, AEPLCIO, .rgf, and MDB Gatekeeper)."""
     return {
         "project_init": {
             "project_dir": str(project_dir),
@@ -823,14 +823,57 @@ def build_native_acade_project_manifest(project_dir: Path, project_name: str = "
             {"block_name": "VCB11Q13", "point": [142.0, 250.0], "attributes": {"TAG1": "-Q3", "MFG": "SIEMENS", "CAT": "5SL6210-7", "LOC": "+MAIN_PNL", "DESC1": "MCB 2P 10A PSU"}},
             {"block_name": "VMS2NA13F", "point": [45.0, 240.0], "attributes": {"TAG1": "-Q2", "MFG": "SIEMENS", "CAT": "3RV2021-4AA10", "LOC": "+MAIN_PNL", "DESC1": "MPCB VFD 16A"}},
             {"block_name": "VCR1", "point": [295.0, 240.0], "attributes": {"TAG1": "-K1", "MFG": "SIEMENS", "CAT": "3RT2026-1BB40", "LOC": "+MAIN_PNL", "DESC1": "CONVEYOR CONTACTOR COIL", "ASSYCODE": "AUX_3RH2911_2NO2NC;DIODE_3RT2926"}},
-            {"block_name": "VCR21", "point": [45.0, 210.0], "attributes": {"TAG2": "-K1", "MFG": "SIEMENS", "CAT": "3RT2026-1BB40", "LOC": "+MAIN_PNL", "DESC1": "CONTACTOR POWER POLE L1"}},
+            {"block_name": "VCR21", "point": [45.0, 210.0], "attributes": {"TAG2": "-K1", "TERM01": "1", "TERM02": "2", "LOC": "+MAIN_PNL", "DESC1": "CONTACTOR POLE L1"}},
+            {"block_name": "VCR21", "point": [60.0, 210.0], "attributes": {"TAG2": "-K1", "TERM01": "3", "TERM02": "4", "LOC": "+MAIN_PNL", "DESC1": "CONTACTOR POLE L2"}},
+            {"block_name": "VCR21", "point": [75.0, 210.0], "attributes": {"TAG2": "-K1", "TERM01": "5", "TERM02": "6", "LOC": "+MAIN_PNL", "DESC1": "CONTACTOR POLE L3"}},
             {"block_name": "VMO13", "point": [60.0, 103.0], "attributes": {"TAG1": "-M1", "MFG": "SIEMENS", "CAT": "1LE1001-1BB22", "LOC": "+FIELD", "DESC1": "CONVEYOR MOTOR 4.0KW"}},
             {"block_name": "ht1001", "point": [235.0, 253.0], "attributes": {"TAGSTRIP": "-X1", "TERM01": "F1", "MFG": "PHOENIX CONTACT", "CAT": "3004100", "LOC": "+MAIN_PNL"}},
             {"block_name": "VA1_WEIGH_TRANS", "point": [212.0, 125.0], "attributes": {"TAG1": "-A2", "MFG": "SIEMENS", "CAT": "7MH4910-0AA01", "LOC": "+MAIN_PNL", "INST": "=PLC1"}},
             {"block_name": "ht0001", "point": [182.0, 210.0], "attributes": {"TAGSTRIP": "-X3", "TERM01": "1.L1", "MFG": "PHOENIX CONTACT", "CAT": "3036042", "LOC": "+MAIN_PNL"}},
         ],
+        "wires_and_arrows_sheet_05": {
+            "wires": [
+                {"p1": [25.0, 282.0], "p2": [165.0, 282.0], "layer": "PWR_L1_BK_2.5"},
+                {"p1": [25.0, 278.0], "p2": [165.0, 278.0], "layer": "PWR_L2_BK_2.5"},
+                {"p1": [25.0, 274.0], "p2": [165.0, 274.0], "layer": "PWR_L3_BK_2.5"},
+                {"p1": [45.0, 282.0], "p2": [45.0, 118.0], "layer": "PWR_L1_BK_2.5"},
+                {"p1": [60.0, 278.0], "p2": [60.0, 118.0], "layer": "PWR_L2_BK_2.5"},
+                {"p1": [75.0, 274.0], "p2": [75.0, 118.0], "layer": "PWR_L3_BK_2.5"},
+                {"p1": [235.0, 268.0], "p2": [235.0, 220.0], "layer": "CTRL_24VDC_DBU_0.75"},
+            ],
+            "dots": [[45.0, 282.0], [60.0, 278.0], [75.0, 274.0]],
+            "arrows": [
+                {"kind": "source", "point": [165.0, 282.0], "sigcode": "BUS_L1_400VAC", "wireno": "L1"},
+                {"kind": "destination", "point": [25.0, 282.0], "sigcode": "BUS_L1_400VAC", "wireno": "L1"},
+            ],
+        },
         "plc_io_csv": str(Path(__file__).resolve().parent.parent / "templates" / "plc_io_import_template.csv"),
         "rgf_file": str(Path(__file__).resolve().parent.parent / "templates" / "project_master_reports.rgf"),
+    }
+
+
+def execute_native_manifest(manifest: dict, mdb_path: Path | None = None) -> dict:
+    """Execute the native ACADE manifest end-to-end via autocad_mcp_server handlers (requires running AutoCAD Electrical)."""
+    import sys
+
+    mcp_dir = Path(r"C:\Users\Gaadz\.gemini\config\mcp_servers")
+    if str(mcp_dir) not in sys.path:
+        sys.path.insert(0, str(mcp_dir))
+    import autocad_mcp_server as mcp
+
+    init_res = mcp.tool_acade_project_init(manifest["project_init"])
+    sym_res = [mcp.tool_acade_insert_schematic_symbol(sym) for sym in manifest["schematic_symbols_sheet_05"]]
+    wire_res = mcp.tool_acade_draw_smart_wires_and_arrows(manifest["wires_and_arrows_sheet_05"])
+    plc_res = mcp.tool_acade_build_plc_from_csv({"csv_path": manifest["plc_io_csv"]})
+    retag_res = mcp.tool_acade_run_reports_and_retag({"rgf_path": manifest["rgf_file"]})
+    audit_res = mcp.tool_acade_electrical_audit({"mdb_path": str(mdb_path), "run_dwg_audit": True}) if mdb_path else None
+    return {
+        "init": init_res,
+        "symbols_inserted": len(sym_res),
+        "wires": wire_res,
+        "plc": plc_res,
+        "retag": retag_res,
+        "audit": audit_res,
     }
 
 

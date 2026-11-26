@@ -50,16 +50,34 @@ def _lisp_fail_loud_guard(req_fns: list[str], err_file: str) -> str:
     )
 
 
-def _run_acade_lisp_checked(lisp_body: str, req_fns: list[str], auto_save: bool = True) -> dict[str, Any]:
-    """Send ACADE AutoLISP via COM and raise RuntimeError if any required function is unbound."""
+def _run_acade_lisp_checked(lisp_body: str, req_fns: list[str], auto_save: bool = True, timeout_sec: float = 25.0) -> dict[str, Any]:
+    """Send ACADE AutoLISP via COM, wait for sentinel file (preventing SendCommand async race), and Fail-Loud if unbound."""
     import tempfile
+    import time
 
-    err_path = Path(tempfile.gettempdir()) / "acade_mcp_err.txt"
-    if err_path.exists():
-        err_path.unlink()
+    tmp_dir = Path(tempfile.gettempdir())
+    err_path = tmp_dir / "acade_mcp_err.txt"
+    done_path = tmp_dir / "acade_mcp_done.txt"
+    err_path.unlink(missing_ok=True)
+    done_path.unlink(missing_ok=True)
+
     guard = _lisp_fail_loud_guard(req_fns, str(err_path))
-    full_cmd = f"(progn {_lisp_acade_load()} {guard} (if (not _missing) (progn {lisp_body})))\n"
+    sentinel = (
+        f'(setq _df (open {_lisp_str(str(done_path))} "w")) '
+        f'(write-line "DONE" _df) (close _df)'
+    )
+    full_cmd = f"(progn {_lisp_acade_load()} {guard} (if (not _missing) (progn {lisp_body})) {sentinel})\n"
     res = tool_autocad_run_command({"command": full_cmd, "auto_save": auto_save})
+
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if done_path.exists():
+            break
+        time.sleep(0.15)
+    if not done_path.exists():
+        raise TimeoutError(f"AutoCAD SendCommand did not complete within {timeout_sec}s (possible modal dialog).")
+    done_path.unlink(missing_ok=True)
+
     if err_path.exists():
         msg = err_path.read_text(encoding="utf-8", errors="replace").strip()
         err_path.unlink(missing_ok=True)
@@ -650,39 +668,59 @@ def tool_acade_draw_smart_wires_and_arrows(args: dict[str, Any]) -> dict[str, An
             f'(c:wd_modattrval _a "WIRENO" {_lisp_str(wno)} nil) (entupd _a)))'
         )
     if arrows:
-        arrow_exprs.append('(command "_AEUPDATESIGREF")')
+        arrow_exprs.append('(c:wd_retag_update_noprompts 97 nil)')
 
     lisp_body = f"{' '.join(reg_exprs)} {' '.join(wire_exprs)} {' '.join(dot_exprs)} {' '.join(arrow_exprs)}"
     return _run_acade_lisp_checked(lisp_body, ["c:wd_wire_quik", "c:wd_insym2", "c:wd_modattrval"], auto_save=auto_save)
 
 
 def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
-    """Validate peripheral BLOCK column in PLC I/O CSV and run ACADE Spreadsheet to PLC I/O Utility."""
+    """Validate peripheral BLOCK column in PLC I/O CSV and insert I/O symbols without modal dialogs via c:wd_insym2."""
     import csv as _csv
 
     csv_path = Path(args["csv_path"]).resolve()
-    wdi_path = Path(args.get("wdi_path") or DEFAULT_WDI).resolve()
     if not csv_path.exists():
         raise FileNotFoundError(f"PLC CSV not found: {csv_path}")
 
-    invalid_blocks = []
+    rows: list[dict[str, str]] = []
     with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
         for row in _csv.DictReader(f):
             blk = (row.get("BLOCK") or "").strip().upper()
             if blk.startswith("PLC_"):
-                invalid_blocks.append(blk)
-    if invalid_blocks:
-        raise ValueError(
-            f"Invalid fake PLC module names in BLOCK column ({set(invalid_blocks)}). "
-            "Use real iec-60617 peripheral symbols (e.g., VCR1, VPB11, VLT1A, VSW12) or leave blank."
-        )
+                raise ValueError(
+                    f"Invalid fake PLC module name '{blk}' in BLOCK column. "
+                    "Use real iec-60617 peripheral symbols (e.g., VCR1, VPB11, VLT1A, VSW12) or leave blank."
+                )
+            rows.append(row)
 
-    lisp_body = f'(command "_AEPLCIO" {_lisp_str(str(csv_path))} {_lisp_str(str(wdi_path))})'
-    return _run_acade_lisp_checked(lisp_body, ["c:wd_inplc_nd"], auto_save=bool(args.get("auto_save", True)))
+    ins_exprs = []
+    for idx, row in enumerate(rows):
+        blk = (row.get("BLOCK") or "").strip()
+        if not blk:
+            continue
+        x = 120.0
+        y = 250.0 - idx * 20.0
+        tag = row.get("TAG", "")
+        desc1 = row.get("DESC1", "")
+        desc2 = row.get("DESC2", "")
+        loc = row.get("LOC", "+FIELD")
+        inst = row.get("INST", "=PLC1")
+        ins_exprs.append(
+            f'(setq _pe (c:wd_insym2 {_lisp_str(blk)} \'({x} {y} 0.0) 1.0 nil)) '
+            f'(if _pe (progn '
+            f'(c:wd_modattrval _pe "TAG1" {_lisp_str(tag)} nil) '
+            f'(c:wd_modattrval _pe "DESC1" {_lisp_str(desc1)} nil) '
+            f'(c:wd_modattrval _pe "DESC2" {_lisp_str(desc2)} nil) '
+            f'(c:wd_modattrval _pe "LOC" {_lisp_str(loc)} nil) '
+            f'(c:wd_modattrval _pe "INST" {_lisp_str(inst)} nil) '
+            f'(entupd _pe)))'
+        )
+    lisp_body = " ".join(ins_exprs) if ins_exprs else '(princ "No peripheral blocks to insert")'
+    return _run_acade_lisp_checked(lisp_body, ["c:wd_insym2", "c:wd_modattrval"], auto_save=bool(args.get("auto_save", True)))
 
 
 def tool_acade_sync_panel_footprints(args: dict[str, Any]) -> dict[str, Any]:
-    """Query COMP (PAR1_CHLD2='1' AND LOC IN ('+MAIN_PNL','+DOOR')) from Scratch .mdb to sync Panel Footprints."""
+    """Query COMP (PAR1_CHLD2='1' AND LOC IN ('+MAIN_PNL','+DOOR')) from Scratch .mdb and optionally insert real PNL_* blocks."""
     mdb_path = Path(args["mdb_path"]).resolve()
     if not mdb_path.exists():
         raise FileNotFoundError(f"Scratch database not found: {mdb_path}")
@@ -710,20 +748,37 @@ $conn.Close()
 @{{ count = $items.Count; components = $items }} | ConvertTo-Json -Depth 4 -Compress
 """
     res = _run_ps(ps, timeout=30)
-    if args.get("run_aefootprint"):
-        _run_acade_lisp_checked('(command "_AEFOOTPRINT")', ["c:wd_insym2"], auto_save=True)
+    if args.get("run_aefootprint") and res.get("components"):
+        ins_exprs = []
+        for idx, comp in enumerate(res["components"]):
+            mfg = (comp.get("mfg") or "SIEMENS").upper()
+            cat = (comp.get("cat") or "").upper().replace("-", "_")
+            blk = f"CUSTOM/{mfg}/PNL_{mfg}_{cat}"
+            x = 100.0 + (idx % 5) * 120.0
+            y = 900.0 - (idx // 5) * 200.0
+            ins_exprs.append(
+                f'(setq _fp (c:wd_insym2 {_lisp_str(blk)} \'({x} {y} 0.0) 1.0 nil)) '
+                f'(if _fp (progn '
+                f'(c:wd_modattrval _fp "P_TAG1" {_lisp_str(comp.get("tag", ""))} nil) '
+                f'(c:wd_modattrval _fp "MFG" {_lisp_str(mfg)} nil) '
+                f'(c:wd_modattrval _fp "CAT" {_lisp_str(comp.get("cat", ""))} nil) '
+                f'(c:wd_modattrval _fp "LOC" {_lisp_str(comp.get("loc", ""))} nil) '
+                f'(entupd _fp)))'
+            )
+        _run_acade_lisp_checked(" ".join(ins_exprs), ["c:wd_insym2", "c:wd_modattrval"], auto_save=True)
     return res
 
 
 def tool_acade_run_reports_and_retag(args: dict[str, Any]) -> dict[str, Any]:
-    """Run project-wide AEREBUILDDB, c:wd_retag_update_noprompts, AEWIRENO, c:wd_tb_process_one, and AEREPORTGROUP (.rgf)."""
+    """Run non-interactive AEREBUILDDB, c:wd_retag_update_noprompts, c:wd_tb_process_one, and optional AEREPORTGROUP."""
     rgf_path = Path(args.get("rgf_path") or DEFAULT_RGF).resolve()
     lisp_body = (
+        '(setvar "FILEDIA" 0) (setvar "CMDDIA" 0) '
         '(command "_AEREBUILDDB") '
         '(c:wd_retag_update_noprompts 97 nil) '
-        '(command "_AEWIRENO") '
         '(c:wd_tb_process_one 1 (list (list 1 1 1 1 1 1 1 1 0 0 1 1 1))) '
-        f'(if (findfile {_lisp_str(str(rgf_path))}) (command "_AEREPORTGROUP" {_lisp_str(str(rgf_path))}))'
+        f'(if (findfile {_lisp_str(str(rgf_path))}) (command "_AEREPORTGROUP" {_lisp_str(str(rgf_path))})) '
+        '(setvar "CMDDIA" 1) (setvar "FILEDIA" 1)'
     )
     return _run_acade_lisp_checked(
         lisp_body,
@@ -733,7 +788,9 @@ def tool_acade_run_reports_and_retag(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def tool_acade_electrical_audit(args: dict[str, Any]) -> dict[str, Any]:
-    """Run Database Gatekeeper audit on Project Scratch .mdb + AEAUDIT/AEDWGAUDIT."""
+    """Run AEAUDIT (if requested) then Fail-Closed Database Gatekeeper audit on Project Scratch .mdb."""
+    if args.get("run_dwg_audit"):
+        _run_acade_lisp_checked('(setvar "CMDDIA" 0) (setvar "FILEDIA" 0) (command "_AEAUDIT") (setvar "CMDDIA" 1) (setvar "FILEDIA" 1)', ["c:wd_insym2"], auto_save=False)
     mdb_path = Path(args["mdb_path"]).resolve()
     proc = subprocess.run(
         [sys.executable, str(AUDIT_SCRIPT), "--mdb", str(mdb_path)],
@@ -745,10 +802,7 @@ def tool_acade_electrical_audit(args: dict[str, Any]) -> dict[str, Any]:
     )
     if proc.returncode not in (0, 2):
         raise RuntimeError((proc.stderr or proc.stdout or "Audit script failed").strip())
-    audit_res = json.loads(proc.stdout.strip())
-    if args.get("run_dwg_audit"):
-        tool_autocad_run_command({"command": f"(progn {_lisp_acade_load()}(command \"_AEDWGAUDIT\"))\n", "auto_save": False})
-    return audit_res
+    return json.loads(proc.stdout.strip())
 
 
 TOOLS = [
