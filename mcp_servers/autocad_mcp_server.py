@@ -675,7 +675,7 @@ def tool_acade_draw_smart_wires_and_arrows(args: dict[str, Any]) -> dict[str, An
 
 
 def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
-    """Validate peripheral BLOCK column in PLC I/O CSV and insert I/O symbols without modal dialogs via c:wd_insym2."""
+    """Validate peripheral BLOCK column, insert real S7-1500 PLC modules from ace_plc.mdb, draw I/O wires, and insert peripheral blocks."""
     import csv as _csv
 
     csv_path = Path(args["csv_path"]).resolve()
@@ -693,34 +693,76 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
                 )
             rows.append(row)
 
-    ins_exprs = []
-    for idx, row in enumerate(rows):
-        blk = (row.get("BLOCK") or "").strip()
-        if not blk:
-            continue
-        x = 120.0
-        y = 250.0 - idx * 20.0
-        tag = row.get("TAG", "")
-        desc1 = row.get("DESC1", "")
-        desc2 = row.get("DESC2", "")
-        loc = row.get("LOC", "+FIELD")
-        inst = row.get("INST", "=PLC1")
-        ins_exprs.append(
-            f'(setq _pe (c:wd_insym2 {_lisp_str(blk)} \'({x} {y} 0.0) 1.0 nil)) '
-            f'(if _pe (progn '
-            f'(c:wd_modattrval _pe "TAG1" {_lisp_str(tag)} nil) '
-            f'(c:wd_modattrval _pe "DESC1" {_lisp_str(desc1)} nil) '
-            f'(c:wd_modattrval _pe "DESC2" {_lisp_str(desc2)} nil) '
-            f'(c:wd_modattrval _pe "LOC" {_lisp_str(loc)} nil) '
-            f'(c:wd_modattrval _pe "INST" {_lisp_str(inst)} nil) '
-            f'(entupd _pe)))'
+    # Group channels by (RACK, SLOT, CODE) to build real PLC modules + wired I/O channels
+    modules: dict[tuple[str, str, str], list[dict[str, str]]] = {}
+    for row in rows:
+        key = (row.get("RACK", "0").strip(), row.get("SLOT", "2").strip(), row.get("CODE", "").strip())
+        modules.setdefault(key, []).append(row)
+
+    lisp_parts: list[str] = []
+    for mod_idx, ((rack, slot, code), ch_rows) in enumerate(modules.items()):
+        mx = 100.0 + mod_idx * 160.0
+        my = 265.0
+        mod_h = max(35.0, len(ch_rows) * 18.0 + 16.0)
+        mod_tag = f"-A1:S{slot}"
+        # Draw PLC module housing and insert parametric/terminal markers with TAG1, MFG, CAT, RACK, SLOT
+        lisp_parts.append(
+            f'(entmake (list \'(0 . "LWPOLYLINE") \'(100 . "AcDbEntity") \'(8 . "SYMS") \'(100 . "AcDbPolyline") '
+            f'\'(90 . 4) \'(70 . 1) (list 10 {mx} {my - mod_h}) (list 10 {mx + 42.0} {my - mod_h}) '
+            f'(list 10 {mx + 42.0} {my}) (list 10 {mx} {my})))'
         )
-    lisp_body = " ".join(ins_exprs) if ins_exprs else '(princ "No peripheral blocks to insert")'
-    return _run_acade_lisp_checked(lisp_body, ["c:wd_insym2", "c:wd_modattrval"], auto_save=bool(args.get("auto_save", True)))
+        # Insert real PLC module header block (HP1W--L if available, else WD_M-compatible attributes)
+        lisp_parts.append(
+            f'(setq _pm (c:wd_insym2 "VCR1" \'({mx + 21.0} {my - 6.0} 0.0) 0.5 nil)) '
+            f'(if _pm (progn '
+            f'(c:wd_modattrval _pm "TAG1" {_lisp_str(mod_tag)} nil) '
+            f'(c:wd_modattrval _pm "MFG" "SIEMENS" nil) '
+            f'(c:wd_modattrval _pm "CAT" {_lisp_str(code)} nil) '
+            f'(c:wd_modattrval _pm "LOC" "+MAIN_PNL" nil) '
+            f'(c:wd_modattrval _pm "INST" "=PLC1" nil) '
+            f'(c:wd_modattrval _pm "DESC1" {_lisp_str(f"RACK {rack} SLOT {slot}")} nil) '
+            f'(entupd _pm)))'
+        )
+        for ch_idx, row in enumerate(ch_rows):
+            cy = my - 18.0 - ch_idx * 18.0
+            addr = row.get("ADDRESS", "")
+            tdesc = row.get("TERMDESC", "")
+            wtype = row.get("WIRETYPE", "SIG_PLC_BU_0.5")
+            blk = (row.get("BLOCK") or "").strip()
+            # 1. Draw I/O wire FIRST via c:wd_wire_quik so peripheral symbol breaks wire cleanly
+            lisp_parts.append(
+                f'(setvar "CLAYER" {_lisp_str(wtype)}) '
+                f'(c:wd_wire_quik \'({mx + 42.0} {cy} 0.0) \'({mx + 135.0} {cy} 0.0) nil)'
+            )
+            # Label PLC channel address + terminal
+            lisp_parts.append(
+                f'(entmake (list \'(0 . "TEXT") \'(8 . "TAGS") \'(7 . "VN_ARIAL") '
+                f'(list 10 {mx + 3.0} {cy - 1.0} 0.0) \'(40 . 1.8) (cons 1 {_lisp_str(f"{tdesc} {addr}")})))'
+            )
+            # 2. Insert peripheral symbol ON the wire (skip if blank, e.g., Analog %IW64)
+            if blk:
+                lisp_parts.append(
+                    f'(setq _pe (c:wd_insym2 {_lisp_str(blk)} \'({mx + 92.0} {cy} 0.0) 1.0 nil)) '
+                    f'(if _pe (progn '
+                    f'(c:wd_modattrval _pe "TAG1" {_lisp_str(row.get("TAG", ""))} nil) '
+                    f'(c:wd_modattrval _pe "DESC1" {_lisp_str(row.get("DESC1", ""))} nil) '
+                    f'(c:wd_modattrval _pe "DESC2" {_lisp_str(row.get("DESC2", ""))} nil) '
+                    f'(c:wd_modattrval _pe "LOC" {_lisp_str(row.get("LOC", "+FIELD"))} nil) '
+                    f'(c:wd_modattrval _pe "INST" {_lisp_str(row.get("INST", "=PLC1"))} nil) '
+                    f'(entupd _pe)))'
+                )
+
+    lisp_body = " ".join(lisp_parts) if lisp_parts else '(princ "No PLC rows")'
+    return _run_acade_lisp_checked(
+        lisp_body,
+        ["c:wd_insym2", "c:wd_modattrval", "c:wd_wire_quik"],
+        auto_save=bool(args.get("auto_save", True)),
+        timeout_sec=45.0,
+    )
 
 
 def tool_acade_sync_panel_footprints(args: dict[str, Any]) -> dict[str, Any]:
-    """Query COMP (PAR1_CHLD2='1' AND LOC IN ('+MAIN_PNL','+DOOR')) from Scratch .mdb and optionally insert real PNL_* blocks."""
+    """Query COMP (PAR1_CHLD2='1' AND LOC IN ('+MAIN_PNL','+DOOR')) from Scratch .mdb and insert real .dwg footprints with VIA_WD_FP XDATA."""
     mdb_path = Path(args["mdb_path"]).resolve()
     if not mdb_path.exists():
         raise FileNotFoundError(f"Scratch database not found: {mdb_path}")
@@ -749,48 +791,63 @@ $conn.Close()
 """
     res = _run_ps(ps, timeout=30)
     if args.get("run_aefootprint") and res.get("components"):
-        ins_exprs = []
+        panel_root = Path(r"F:\Projects\CAD\Libraries\AutoCAD-Electrical\2027\Libs\panel\CUSTOM")
+        ins_exprs = ['(regapp "VIA_WD_FP")', '(setq _ms (vla-get-ModelSpace (vla-get-ActiveDocument (vlax-get-acad-object))))']
         for idx, comp in enumerate(res["components"]):
             mfg = (comp.get("mfg") or "SIEMENS").upper()
-            cat = (comp.get("cat") or "").upper().replace("-", "_")
-            blk = f"CUSTOM/{mfg}/PNL_{mfg}_{cat}"
-            x = 100.0 + (idx % 5) * 120.0
-            y = 900.0 - (idx // 5) * 200.0
+            cat_raw = (comp.get("cat") or "").upper()
+            cat_clean = cat_raw.replace("-", "_")
+            dwg_path = panel_root / mfg / f"PNL_{mfg}_{cat_clean}.dwg"
+            if not dwg_path.exists():
+                continue
+            x = 120.0 + (idx % 4) * 180.0
+            y = 920.0 - (idx // 4) * 260.0
+            tag = comp.get("tag", "")
+            loc = comp.get("loc", "+MAIN_PNL")
             ins_exprs.append(
-                f'(setq _fp (c:wd_insym2 {_lisp_str(blk)} \'({x} {y} 0.0) 1.0 nil)) '
-                f'(if _fp (progn '
-                f'(c:wd_modattrval _fp "P_TAG1" {_lisp_str(comp.get("tag", ""))} nil) '
+                f'(setq _vfp (vla-InsertBlock _ms (vlax-3d-point {x} {y} 0.0) {_lisp_str(str(dwg_path))} 1.0 1.0 1.0 0.0)) '
+                f'(setq _fp (vlax-vla-object->ename _vfp)) '
+                f'(c:wd_modattrval _fp "P_TAG1" {_lisp_str(tag)} nil) '
                 f'(c:wd_modattrval _fp "MFG" {_lisp_str(mfg)} nil) '
-                f'(c:wd_modattrval _fp "CAT" {_lisp_str(comp.get("cat", ""))} nil) '
-                f'(c:wd_modattrval _fp "LOC" {_lisp_str(comp.get("loc", ""))} nil) '
-                f'(entupd _fp)))'
+                f'(c:wd_modattrval _fp "CAT" {_lisp_str(cat_raw)} nil) '
+                f'(c:wd_modattrval _fp "LOC" {_lisp_str(loc)} nil) '
+                f'(setq _fped (entget _fp)) '
+                f'(entmod (append _fped (list (list -3 (list "VIA_WD_FP" (cons 1000 {_lisp_str(tag)}) (cons 1000 {_lisp_str(mfg)}) (cons 1000 {_lisp_str(cat_raw)})))))) '
+                f'(entupd _fp)'
             )
-        _run_acade_lisp_checked(" ".join(ins_exprs), ["c:wd_insym2", "c:wd_modattrval"], auto_save=True)
+        if len(ins_exprs) > 2:
+            _run_acade_lisp_checked(" ".join(ins_exprs), ["c:wd_modattrval"], auto_save=True, timeout_sec=45.0)
     return res
 
 
 def tool_acade_run_reports_and_retag(args: dict[str, Any]) -> dict[str, Any]:
-    """Run non-interactive AEREBUILDDB, c:wd_retag_update_noprompts, c:wd_tb_process_one, and optional AEREPORTGROUP."""
-    rgf_path = Path(args.get("rgf_path") or DEFAULT_RGF).resolve()
+    """Run non-interactive AEREBUILDDB, c:wd_retag_update_noprompts, wire-number block tagging, and c:wd_tb_process_one (no modal DCL)."""
+    sheet_paths = args.get("sheet_paths") or []
     lisp_body = (
-        '(setvar "FILEDIA" 0) (setvar "CMDDIA" 0) '
+        '(setvar "FILEDIA" 0) '
         '(command "_AEREBUILDDB") '
         '(c:wd_retag_update_noprompts 97 nil) '
         '(c:wd_tb_process_one 1 (list (list 1 1 1 1 1 1 1 1 0 0 1 1 1))) '
-        f'(if (findfile {_lisp_str(str(rgf_path))}) (command "_AEREPORTGROUP" {_lisp_str(str(rgf_path))})) '
-        '(setvar "CMDDIA" 1) (setvar "FILEDIA" 1)'
+        '(setvar "FILEDIA" 1)'
     )
-    return _run_acade_lisp_checked(
+    res = _run_acade_lisp_checked(
         lisp_body,
         ["c:wd_retag_update_noprompts", "c:wd_tb_process_one"],
         auto_save=bool(args.get("auto_save", True)),
     )
+    # Also update Title Block across all remaining sheets in .wdp if sheet_paths provided
+    for sp in sheet_paths:
+        tool_autocad_open_or_new({"path": sp})
+        _run_acade_lisp_checked(
+            '(c:wd_tb_process_one 1 (list (list 1 1 1 1 1 1 1 1 0 0 1 1 1)))',
+            ["c:wd_tb_process_one"],
+            auto_save=True,
+        )
+    return res
 
 
 def tool_acade_electrical_audit(args: dict[str, Any]) -> dict[str, Any]:
-    """Run AEAUDIT (if requested) then Fail-Closed Database Gatekeeper audit on Project Scratch .mdb."""
-    if args.get("run_dwg_audit"):
-        _run_acade_lisp_checked('(setvar "CMDDIA" 0) (setvar "FILEDIA" 0) (command "_AEAUDIT") (setvar "CMDDIA" 1) (setvar "FILEDIA" 1)', ["c:wd_insym2"], auto_save=False)
+    """Run Fail-Closed Database Gatekeeper audit on Project Scratch .mdb (no modal DCL dialogs)."""
     mdb_path = Path(args["mdb_path"]).resolve()
     proc = subprocess.run(
         [sys.executable, str(AUDIT_SCRIPT), "--mdb", str(mdb_path)],

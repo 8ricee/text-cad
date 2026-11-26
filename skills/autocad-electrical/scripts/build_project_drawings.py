@@ -853,7 +853,7 @@ def build_native_acade_project_manifest(project_dir: Path, project_name: str = "
 
 
 def execute_native_manifest(manifest: dict, mdb_path: Path | None = None) -> dict:
-    """Execute the native ACADE manifest end-to-end via autocad_mcp_server handlers (requires running AutoCAD Electrical)."""
+    """Execute the native ACADE manifest end-to-end via autocad_mcp_server handlers (opens each sheet, draws wires BEFORE symbols)."""
     import sys
 
     mcp_dir = Path(r"C:\Users\Gaadz\.gemini\config\mcp_servers")
@@ -861,17 +861,44 @@ def execute_native_manifest(manifest: dict, mdb_path: Path | None = None) -> dic
         sys.path.insert(0, str(mcp_dir))
     import autocad_mcp_server as mcp
 
+    proj_dir = Path(manifest["project_init"]["project_dir"])
     init_res = mcp.tool_acade_project_init(manifest["project_init"])
-    sym_res = [mcp.tool_acade_insert_schematic_symbol(sym) for sym in manifest["schematic_symbols_sheet_05"]]
+
+    # Sheet 05: Open 05_control_schematic.dwg -> Draw smart wires FIRST -> Insert symbols ON wires SECOND (auto-break)
+    mcp.tool_autocad_open_or_new({"path": str(proj_dir / "05_control_schematic.dwg")})
     wire_res = mcp.tool_acade_draw_smart_wires_and_arrows(manifest["wires_and_arrows_sheet_05"])
+    sym_res = [mcp.tool_acade_insert_schematic_symbol(sym) for sym in manifest["schematic_symbols_sheet_05"]]
+
+    # Sheet 06: Open 06_plc_io_wiring.dwg -> Build PLC modules + wired I/O channels
+    mcp.tool_autocad_open_or_new({"path": str(proj_dir / "06_plc_io_wiring.dwg")})
     plc_res = mcp.tool_acade_build_plc_from_csv({"csv_path": manifest["plc_io_csv"]})
-    retag_res = mcp.tool_acade_run_reports_and_retag({"rgf_path": manifest["rgf_file"]})
-    audit_res = mcp.tool_acade_electrical_audit({"mdb_path": str(mdb_path), "run_dwg_audit": True}) if mdb_path else None
+
+    # Sheet 07: Open 07_panel_layout.dwg -> Sync Panel Footprints (with VIA_WD_FP) if Scratch .mdb is available
+    panel_res = None
+    if mdb_path and mdb_path.exists():
+        mcp.tool_autocad_open_or_new({"path": str(proj_dir / "07_panel_layout.dwg")})
+        panel_res = mcp.tool_acade_sync_panel_footprints({"mdb_path": str(mdb_path), "run_aefootprint": True})
+
+    sheet_paths = [
+        str(proj_dir / s)
+        for s in (
+            "01_cover_and_index.dwg",
+            "04_power_distribution.dwg",
+            "05_control_schematic.dwg",
+            "06_plc_io_wiring.dwg",
+            "07_panel_layout.dwg",
+            "09_terminal_and_cable_list.dwg",
+        )
+        if (proj_dir / s).exists()
+    ]
+    retag_res = mcp.tool_acade_run_reports_and_retag({"sheet_paths": sheet_paths})
+    audit_res = mcp.tool_acade_electrical_audit({"mdb_path": str(mdb_path)}) if mdb_path else None
     return {
         "init": init_res,
-        "symbols_inserted": len(sym_res),
         "wires": wire_res,
+        "symbols_inserted": len(sym_res),
         "plc": plc_res,
+        "panel": panel_res,
         "retag": retag_res,
         "audit": audit_res,
     }
