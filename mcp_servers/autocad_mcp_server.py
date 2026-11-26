@@ -971,6 +971,12 @@ def tool_acade_place_db_reports_on_drawing(args: dict[str, Any]) -> dict[str, An
     elif report_type == "TERMINAL_PLAN":
         sql = "SELECT TAGSTRIP, TERM, WIRENO, LOC, INST FROM [TERMS] ORDER BY TAGSTRIP, TERM"
         headers = ["STRIP", "TERM", "WIRE NO", "LOC", "INST"]
+    elif report_type == "CABLE_SUMMARY":
+        sql = (
+            "SELECT CBL, COUNT(*) AS CORES, MAX(NAM1) AS FROM_TAG, MAX(NAM2) AS TO_TAG, MAX(WLAY1) AS WIRE_LAYER "
+            "FROM [WFRM2ALL] WHERE CBL IS NOT NULL AND CBL<>'' GROUP BY CBL ORDER BY CBL"
+        )
+        headers = ["CABLE TAG", "CORES", "FROM", "TO", "LAYER"]
     else:
         raise ValueError(f"Unsupported report_type: {report_type}")
 
@@ -1029,19 +1035,21 @@ $conn.Close()
 
 
 def tool_acade_insert_cable_and_jumper(args: dict[str, Any]) -> dict[str, Any]:
-    """Insert ACADE Cable Marker (VWO1) on field cables and/or assign multi-level terminal / jumper attributes (LEVEL, LNUMBER, LTOTAL, JUMPER_ID)."""
+    """Insert ACADE Cable Marker (VW01 Parent / VW02 Child) and assign real ht0001 attributes (LINKTERM, STRIPSEQ, X1PIN01/X4PIN01) + VIA_WD_* XDATA."""
     cables = args.get("cables") or []
     terminals = args.get("terminals") or []
     auto_save = bool(args.get("auto_save", True))
 
-    lisp_parts: list[str] = []
+    lisp_parts: list[str] = ['(regapp "VIA_WD_LNUMBER")', '(regapp "VIA_WD_LTOTAL")', '(regapp "VIA_WD_JUMPERS")']
     for c in cables:
         pt = c["point"]
-        blk = c.get("block_name", "VWO1")
+        is_child = bool(c.get("is_child", False))
+        blk = c.get("block_name") or ("VW02" if is_child else "VW01")
+        tag_attr = "TAG2" if is_child else "TAG1"
         lisp_parts.append(
             f'(setq _cb (c:wd_insym2 {_lisp_str(blk)} \'({float(pt[0])} {float(pt[1])} 0.0) 1.0 nil)) '
             f'(if _cb (progn '
-            f'(c:wd_modattrval _cb "TAG1" {_lisp_str(c.get("tag", "-W1"))} nil) '
+            f'(c:wd_modattrval _cb {_lisp_str(tag_attr)} {_lisp_str(c.get("tag", "-W1"))} nil) '
             f'(c:wd_modattrval _cb "MFG" {_lisp_str(c.get("mfg", ""))} nil) '
             f'(c:wd_modattrval _cb "CAT" {_lisp_str(c.get("cat", ""))} nil) '
             f'(c:wd_modattrval _cb "DESC1" {_lisp_str(c.get("desc1", ""))} nil) '
@@ -1050,18 +1058,33 @@ def tool_acade_insert_cable_and_jumper(args: dict[str, Any]) -> dict[str, Any]:
     for t in terminals:
         pt = t["point"]
         blk = t.get("block_name", "ht0001")
+        lnum = t.get("lnumber", "")
+        ltot = t.get("ltotal", "")
+        jmp = t.get("jumper_id", "")
+        xdata_exprs = []
+        if lnum:
+            xdata_exprs.append(f'(list "VIA_WD_LNUMBER" (cons 1000 {_lisp_str(lnum)}))')
+        if ltot:
+            xdata_exprs.append(f'(list "VIA_WD_LTOTAL" (cons 1000 {_lisp_str(ltot)}))')
+        if jmp:
+            xdata_exprs.append(f'(list "VIA_WD_JUMPERS" (cons 1000 {_lisp_str(jmp)}))')
+        xd_attach = (
+            f'(setq _tmed (entget _tm)) (entmod (append _tmed (list (list -3 {" ".join(xdata_exprs)}))))'
+            if xdata_exprs
+            else ""
+        )
         lisp_parts.append(
             f'(setq _tm (c:wd_insym2 {_lisp_str(blk)} \'({float(pt[0])} {float(pt[1])} 0.0) 1.0 nil)) '
             f'(if _tm (progn '
             f'(c:wd_modattrval _tm "TAGSTRIP" {_lisp_str(t.get("tagstrip", "-X3"))} nil) '
             f'(c:wd_modattrval _tm "TERM01" {_lisp_str(t.get("term", "1"))} nil) '
-            f'(c:wd_modattrval _tm "LEVEL" {_lisp_str(t.get("level", ""))} nil) '
-            f'(c:wd_modattrval _tm "LNUMBER" {_lisp_str(t.get("lnumber", ""))} nil) '
-            f'(c:wd_modattrval _tm "LTOTAL" {_lisp_str(t.get("ltotal", ""))} nil) '
-            f'(c:wd_modattrval _tm "JUMPER_ID" {_lisp_str(t.get("jumper_id", ""))} nil) '
-            f'(entupd _tm)))'
+            f'(c:wd_modattrval _tm "LINKTERM" {_lisp_str(t.get("linkterm", ""))} nil) '
+            f'(c:wd_modattrval _tm "STRIPSEQ" {_lisp_str(t.get("stripseq", ""))} nil) '
+            f'(c:wd_modattrval _tm "X1PIN01" {_lisp_str(t.get("x1pin", ""))} nil) '
+            f'(c:wd_modattrval _tm "X4PIN01" {_lisp_str(t.get("x4pin", ""))} nil) '
+            f'{xd_attach} (entupd _tm)))'
         )
-    lisp_body = " ".join(lisp_parts) if lisp_parts else '(princ "No cables or terminals")'
+    lisp_body = " ".join(lisp_parts)
     return _run_acade_lisp_checked(lisp_body, ["c:wd_insym2", "c:wd_modattrval"], auto_save=auto_save)
 
 
@@ -1267,7 +1290,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "mdb_path": {"type": "string"},
-                "report_type": {"type": "string", "enum": ["BOM", "WIRE_FROM_TO", "PLCIO", "TERMINAL_PLAN"], "default": "BOM"},
+                "report_type": {"type": "string", "enum": ["BOM", "WIRE_FROM_TO", "PLCIO", "TERMINAL_PLAN", "CABLE_SUMMARY"], "default": "BOM"},
                 "insert": {"type": "array", "items": {"type": "number"}},
                 "space": {"type": "string", "enum": ["ModelSpace", "PaperSpace"], "default": "ModelSpace"},
                 "auto_save": {"type": "boolean", "default": True},
@@ -1277,7 +1300,7 @@ TOOLS = [
     },
     {
         "name": "acade_insert_cable_and_jumper",
-        "description": "Insert ACADE Cable Marker (VWO1) for field cables and assign multi-level terminal / jumper attributes (LEVEL, LNUMBER, LTOTAL, JUMPER_ID).",
+        "description": "Insert ACADE Cable Marker (VW01 Parent / VW02 Child) for field cables and assign real ht0001 attributes (LINKTERM, STRIPSEQ, X1PIN01/X4PIN01) + VIA_WD_* XDATA.",
         "inputSchema": {
             "type": "object",
             "properties": {
