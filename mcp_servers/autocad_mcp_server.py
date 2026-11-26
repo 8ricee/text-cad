@@ -625,11 +625,40 @@ def tool_acade_insert_schematic_symbol(args: dict[str, Any]) -> dict[str, Any]:
     return _run_acade_lisp_checked(lisp_body, ["c:wd_insym2", "c:wd_modattrval"], auto_save=auto_save)
 
 
+def _split_wires_at_dots(wires: list[dict[str, Any]], dots: list[list[float]]) -> list[dict[str, Any]]:
+    """Split orthogonal wire segments at any mid-segment T-junction dot so BFS & ACADE share exact endpoints."""
+    result: list[dict[str, Any]] = []
+    eps = 0.1
+    for w in wires:
+        x1, y1 = float(w["p1"][0]), float(w["p1"][1])
+        x2, y2 = float(w["p2"][0]), float(w["p2"][1])
+        lyr = w["layer"]
+        if abs(y1 - y2) <= eps:  # horizontal
+            lo, hi = min(x1, x2), max(x1, x2)
+            splits = sorted({float(d[0]) for d in dots if abs(float(d[1]) - y1) <= eps and lo + eps < float(d[0]) < hi - eps})
+            pts = [lo, *splits, hi]
+            if x1 > x2:
+                pts.reverse()
+            for a, b in zip(pts[:-1], pts[1:]):
+                result.append({"p1": [a, y1], "p2": [b, y1], "layer": lyr})
+        elif abs(x1 - x2) <= eps:  # vertical
+            lo, hi = min(y1, y2), max(y1, y2)
+            splits = sorted({float(d[1]) for d in dots if abs(float(d[0]) - x1) <= eps and lo + eps < float(d[1]) < hi - eps})
+            pts = [lo, *splits, hi]
+            if y1 > y2:
+                pts.reverse()
+            for a, b in zip(pts[:-1], pts[1:]):
+                result.append({"p1": [x1, a], "p2": [x1, b], "layer": lyr})
+        else:
+            result.append(w)
+    return result
+
+
 def tool_acade_draw_smart_wires_and_arrows(args: dict[str, Any]) -> dict[str, Any]:
-    """Draw smart ACADE wires via (c:wd_wire_quik), register VIA_WD_WIRETYPE XDATA, insert WDDOT, and Source/Dest arrows."""
+    """Draw smart ACADE wires via (c:wd_wire_quik) (auto-splitting at T-dots), register VIA_WD_WIRETYPE, insert WDDOT, and Source/Dest arrows."""
     wire_layers = args.get("wire_layers") or []
-    wires = args.get("wires") or []
     dots = args.get("dots") or []
+    wires = _split_wires_at_dots(args.get("wires") or [], dots)
     arrows = args.get("arrows") or []
     auto_save = bool(args.get("auto_save", True))
 
@@ -999,6 +1028,43 @@ $conn.Close()
     return {"report_type": report_type, "rows": len(db_rows), "placed": True, "draw": draw_res}
 
 
+def tool_acade_insert_cable_and_jumper(args: dict[str, Any]) -> dict[str, Any]:
+    """Insert ACADE Cable Marker (VWO1) on field cables and/or assign multi-level terminal / jumper attributes (LEVEL, LNUMBER, LTOTAL, JUMPER_ID)."""
+    cables = args.get("cables") or []
+    terminals = args.get("terminals") or []
+    auto_save = bool(args.get("auto_save", True))
+
+    lisp_parts: list[str] = []
+    for c in cables:
+        pt = c["point"]
+        blk = c.get("block_name", "VWO1")
+        lisp_parts.append(
+            f'(setq _cb (c:wd_insym2 {_lisp_str(blk)} \'({float(pt[0])} {float(pt[1])} 0.0) 1.0 nil)) '
+            f'(if _cb (progn '
+            f'(c:wd_modattrval _cb "TAG1" {_lisp_str(c.get("tag", "-W1"))} nil) '
+            f'(c:wd_modattrval _cb "MFG" {_lisp_str(c.get("mfg", ""))} nil) '
+            f'(c:wd_modattrval _cb "CAT" {_lisp_str(c.get("cat", ""))} nil) '
+            f'(c:wd_modattrval _cb "DESC1" {_lisp_str(c.get("desc1", ""))} nil) '
+            f'(entupd _cb)))'
+        )
+    for t in terminals:
+        pt = t["point"]
+        blk = t.get("block_name", "ht0001")
+        lisp_parts.append(
+            f'(setq _tm (c:wd_insym2 {_lisp_str(blk)} \'({float(pt[0])} {float(pt[1])} 0.0) 1.0 nil)) '
+            f'(if _tm (progn '
+            f'(c:wd_modattrval _tm "TAGSTRIP" {_lisp_str(t.get("tagstrip", "-X3"))} nil) '
+            f'(c:wd_modattrval _tm "TERM01" {_lisp_str(t.get("term", "1"))} nil) '
+            f'(c:wd_modattrval _tm "LEVEL" {_lisp_str(t.get("level", ""))} nil) '
+            f'(c:wd_modattrval _tm "LNUMBER" {_lisp_str(t.get("lnumber", ""))} nil) '
+            f'(c:wd_modattrval _tm "LTOTAL" {_lisp_str(t.get("ltotal", ""))} nil) '
+            f'(c:wd_modattrval _tm "JUMPER_ID" {_lisp_str(t.get("jumper_id", ""))} nil) '
+            f'(entupd _tm)))'
+        )
+    lisp_body = " ".join(lisp_parts) if lisp_parts else '(princ "No cables or terminals")'
+    return _run_acade_lisp_checked(lisp_body, ["c:wd_insym2", "c:wd_modattrval"], auto_save=auto_save)
+
+
 def tool_acade_electrical_audit(args: dict[str, Any]) -> dict[str, Any]:
     """Run Fail-Closed Database Gatekeeper audit on Project Scratch .mdb (no modal DCL dialogs)."""
     mdb_path = Path(args["mdb_path"]).resolve()
@@ -1210,6 +1276,18 @@ TOOLS = [
         },
     },
     {
+        "name": "acade_insert_cable_and_jumper",
+        "description": "Insert ACADE Cable Marker (VWO1) for field cables and assign multi-level terminal / jumper attributes (LEVEL, LNUMBER, LTOTAL, JUMPER_ID).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cables": {"type": "array", "items": {"type": "object"}},
+                "terminals": {"type": "array", "items": {"type": "object"}},
+                "auto_save": {"type": "boolean", "default": True},
+            },
+        },
+    },
+    {
         "name": "acade_electrical_audit",
         "description": "Gatekeeper audit on ACADE Project Scratch .mdb (missing catalog, duplicate tags, orphaned child contacts, bogus wires, schematic vs panel discrepancy).",
         "inputSchema": {
@@ -1237,6 +1315,7 @@ HANDLERS = {
     "acade_sync_panel_footprints": tool_acade_sync_panel_footprints,
     "acade_run_reports_and_retag": tool_acade_run_reports_and_retag,
     "acade_place_db_reports_on_drawing": tool_acade_place_db_reports_on_drawing,
+    "acade_insert_cable_and_jumper": tool_acade_insert_cable_and_jumper,
     "acade_electrical_audit": tool_acade_electrical_audit,
 }
 

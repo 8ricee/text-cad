@@ -1411,7 +1411,7 @@ def main() -> None:
     manifest = build_native_acade_project_manifest(PROJECT_DIR)
     manifest_path = PROJECT_DIR / "native_acade_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-    print("Built mechanical/3D/custom-symbol CAD artifacts & native ACADE manifest:")
+    print("Built offline 3D/Busbar/Preview artifacts & native ACADE manifest (note: official 07_panel_layout.dwg is built inside .wdp via execute_native_manifest):")
     for p in (p1, p3, p4, p5_3d, p6, manifest_path):
         print(f" - {p} ({p.stat().st_size:,} bytes)")
 

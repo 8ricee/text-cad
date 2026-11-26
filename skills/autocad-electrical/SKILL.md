@@ -147,7 +147,8 @@ Khi thực hiện thiết kế, tính toán hoặc kiểm tra từng loại tủ
        5. **`acade_sync_panel_footprints`**: Truy vấn thiết bị `+MAIN_PNL` & `+DOOR` từ Scratch DB `.mdb` (`COMP` với `PAR1_CHLD2='1'`), chèn Panel Footprint `.dwg` tại tọa độ thực tế trong vỏ tủ kèm XDATA `VIA_WD_FP`.
        6. **`acade_run_reports_and_retag`**: Gắn block số dây `WD_WNH`/`WD_WNV` không hộp thoại, chạy `_AEREBUILDDB` → `c:wd_retag_update_noprompts` → lặp `c:wd_tb_process_one` qua mọi trang `.dwg`.
        7. **`acade_place_db_reports_on_drawing`**: Truy vấn trực tiếp Scratch `.mdb` (`COMP`, `WFRM2ALL`, `PLCIO`, `TERMS`) đặt bảng `AcDbTable` động (`BOM`, `WIRE_FROM_TO`, `PLCIO`, `TERMINAL_PLAN`) lên bản vẽ không vướng hộp thoại DCL.
-       8. **`acade_electrical_audit`**: Thực thi Gatekeeper Fail-Closed kiểm toán trực tiếp trên Project Scratch Database `<project>.mdb` (`COMP`, `PNLCOMP`, `WIRE_ERR`, `WFRM2ALL`).
+       8. **`acade_insert_cable_and_jumper`**: Chèn `Cable Marker` (`VWO1`) cho cáp hiện trường (`+FIELD`) và gán thuộc tính cầu đấu nhiều tầng / cầu nối (`LEVEL`, `LNUMBER`, `LTOTAL`, `JUMPER_ID`).
+       9. **`acade_electrical_audit`**: Thực thi Gatekeeper Fail-Closed kiểm toán trực tiếp trên Project Scratch Database `<project>.mdb` (`COMP`, `PNLCOMP`, `WIRE_ERR`, `WFRM2ALL`).
    - **Bắt buộc cấu hình Font TrueType Unicode (`arial.ttf`, `isocpeur.ttf` hoặc `tahoma.ttf`) trên chuẩn `R2018 (UTF-8)`** cho Textstyle `Standard` / `WD_IEC` / `VN_ARIAL` (cấm để `txt.shx` gây lỗi `?` Tiếng Việt).
    - Ánh xạ Title Block bằng mẫu [templates/default_iec_bilingual.wdt](templates/default_iec_bilingual.wdt), chạy **`Title Block Update` (`AEUPDATETITLEBLOCK`)** đồng bộ toàn dự án và xuất gộp bằng **Publish → Plot Project to PDF**.
 
