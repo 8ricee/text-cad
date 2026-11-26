@@ -1,0 +1,59 @@
+' =============================================================================
+' Autodesk Inventor iLogic Rule: Verify Sketches/FlatPattern & Export Layered DXF
+' Separates OUTER_PROFILE, INNER_CUTS, BEND_UP (Continuous), and BEND_DOWN (Dashed)
+' =============================================================================
+Option Explicit On
+
+Dim oDoc As Document = ThisApplication.ActiveDocument
+If oDoc Is Nothing Then
+    MessageBox.Show("No active Inventor document.", "Antigravity Inventor")
+    Return
+End If
+
+If oDoc.DocumentType = DocumentTypeEnum.kPartDocumentObject Then
+    Dim oPartDoc As PartDocument = CType(oDoc, PartDocument)
+    Dim oCompDef As ComponentDefinition = oPartDoc.ComponentDefinition
+
+    ' 1. Verify all Planar Sketches are Fully Constrained
+    For Each oSk As PlanarSketch In oCompDef.Sketches
+        If oSk.ConstraintStatus <> ConstraintStatusEnum.kFullyConstrainedConstraintStatus Then
+            MessageBox.Show("Sketch '" & oSk.Name & "' is NOT fully constrained! Fix before release.", "Constraint Gate")
+        End If
+    Next
+
+    ' 2. Verify Sheet Metal Flat Pattern & Export Layered DXF
+    If TypeOf oCompDef Is SheetMetalComponentDefinition Then
+        Dim oSM As SheetMetalComponentDefinition = CType(oCompDef, SheetMetalComponentDefinition)
+        If Not oSM.HasFlatPattern Then oSM.Unfold()
+        Dim exportDir As String = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(oDoc.FullFileName), "..\05_Exports")
+        System.IO.Directory.CreateDirectory(exportDir)
+        Dim dxfPath As String = System.IO.Path.Combine(exportDir, System.IO.Path.GetFileNameWithoutExtension(oDoc.FullFileName) & "_FLAT.dxf")
+        Dim sOut As String = "FLAT PATTERN DXF?AcadVersion=2018" & _
+            "&OuterProfileLayer=OUTER_PROFILE&OuterProfileLayerColor=255;255;255" & _
+            "&InteriorProfilesLayer=INNER_CUTS&InteriorProfilesLayerColor=0;255;255" & _
+            "&BendUpLayer=BEND_UP&BendUpLayerColor=0;255;0&BendUpLayerLineType=37633" & _
+            "&BendDownLayer=BEND_DOWN&BendDownLayerColor=255;128;0&BendDownLayerLineType=37634" & _
+            "&InvisibleLayers=IV_TANGENT;IV_TOOL_CENTER;IV_ARC_CENTERS"
+        oSM.DataIO.WriteDataToFile(sOut, dxfPath)
+        MessageBox.Show("Exported Layered Sheet Metal DXF: " & dxfPath, "Antigravity Inventor")
+    End If
+ElseIf oDoc.DocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+    Dim oAsm As AssemblyDocument = CType(oDoc, AssemblyDocument)
+    Dim oCheckSet As ObjectCollection = ThisApplication.TransientObjects.CreateObjectCollection()
+    Dim ungroundedCount As Integer = 0
+    For Each oOcc As ComponentOccurrence In oAsm.ComponentDefinition.Occurrences
+        oCheckSet.Add(oOcc)
+        If Not oOcc.Grounded Then
+            Dim tDof As Integer = 0, rDof As Integer = 0
+            Dim tVec As ObjectsEnumerator = Nothing, rVec As ObjectsEnumerator = Nothing
+            oOcc.GetDegreesOfFreedom(tDof, tVec, rDof, rVec)
+            If (tDof + rDof) > 0 Then ungroundedCount += 1
+        End If
+    Next
+    Dim intCount As Integer = 0
+    If oCheckSet.Count >= 2 Then
+        Dim oResults As InterferenceResults = oAsm.ComponentDefinition.AnalyzeInterference(oCheckSet)
+        intCount = oResults.Count
+    End If
+    MessageBox.Show("Assembly Interferences: " & intCount.ToString() & " | Occurrences with DOF > 0: " & ungroundedCount.ToString(), "Assembly Gate")
+End If

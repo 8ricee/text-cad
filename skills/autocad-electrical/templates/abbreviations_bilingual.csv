@@ -1,0 +1,30 @@
+ABBR,ENGLISH_FULL_NAME,NGHIA_TIENG_VIET,APPLICATION_NOTE
+ACB,Air Circuit Breaker,May cat khong khi,May cat tong tu MSB dong lon (>= 630A)
+MCCB,Molded Case Circuit Breaker,Aptomat dang khoi,Dong cat va bao ve qua tai/ngan mach nhanh & tong vua
+MCB,Miniature Circuit Breaker,Aptomatbranch / tep,Bao ve nhanh chieu sang va dieu khien (<= 63A-125A)
+RCCB,Residual Current Circuit Breaker,Aptomat chong dong ro,Bao ve chong giat (khong bao ve qua tai)
+RCBO,Residual Current Breaker with Overcurrent,Aptomat chong dong ro kem qua tai,Bao ve chong giat + qua tai + ngan mach
+MPCB,Motor Protection Circuit Breaker,Aptomat bao ve dong co,Tich hop bao ve ngan mach va qua tai nhiet cho dong co
+OLR,Overload Relay (Thermal),Ro-le nhiet bao ve qua tai,Lap sau Contactor bao ve qua tai dong co
+VFD,Variable Frequency Drive,Bien tan,Dieu khien toc do dong co xoay chieu 3 pha
+SS,Soft Starter,Bo khoi dong mem,Giam dong khoi dong cho dong co cong suat lon
+SPD,Surge Protection Device,Thiet bi chong set lan truyen,Bao ve qua ap dot bien do set / dong cat
+MFM,Multi-Function Meter,Dong ho do da nang,Do U, I, P, Q, S, cosPhi, kWh, THD
+CT,Current Transformer,Bien dong do luong / bao ve,Chuyen doi dong dien lon sang 5A hoac 1A
+VT,Voltage Transformer (PT),Bien ap do luong,Phuc vu do luong hoac cach ly tin hieu ap
+ATS,Automatic Transfer Switch,Bo chuyen nguon tu dong,Chuyen mach tu dong giua Luoi va May phat
+APFC,Automatic Power Factor Controller,Bo dieu khien tu bu tu dong,Dieu khien dong cat cac cap tu bu theo cosPhi
+PFC,Power Factor Correction,Tu bu cong suat phan khang,Nang cao he so cong suat cosPhi
+PLC,Programmable Logic Controller,Bo dieu khien logic kha trinh,Trung tam dieu khien tu dong hoa
+HMI,Human Machine Interface,Man hinh giao dien nguoi - may,Hien thi va van hanh tren canh tu
+DI,Digital Input,Ngo vao so (24VDC),Nhan tin hieu nut nhan, cam bien, tiep diem
+DO,Digital Output,Ngo ra so (Relay / Transistor),Xuat tin hieu dieu khien Contactor, van, den
+AI,Analog Input,Ngo vao tuong tu (4-20mA / 0-10V),Nhan tin hieu cam bien ap suat, nhiet do, muc
+AO,Analog Output,Ngo ra tuong tu (4-20mA / 0-10V),Xuat tin hieu dat toc do VFD, van tuyen tinh
+PELV,Protective Extra-Low Voltage,Dien ap cuc thap co bao ve noi dat,Nguon 24VDC co cuc 0VDC noi xuong PE (IEC 60204-1)
+FACP,Fire Alarm Control Panel,Trung tam bao chay,Gui tin hieu lien dong sang tu PCCC va cat nguon uu tien
+DOL,Direct On-Line Starter,Khoi dong truc tiep,Khoi dong dong co cong suat nho (<= 5.5-7.5kW)
+Y-D,Star-Delta Starter,Khoi dong Sao - Tam giac,Giam dong khoi dong dong co bang 3 Contactor
+E-STOP,Emergency Stop,Nut dung khan cap,Nut nam do nen vang co chot giu xoay nha
+NO,Normally Open Contact,Tiep diem thuong mo,Dong lai khi cuon hut co dien / tac dong
+NC,Normally Closed Contact,Tiep diem thuong dong,Mo ra khi cuon hut co dien / tac dong

@@ -1,0 +1,27 @@
+* Title Block Mapping for AutoCAD Electrical (IEC Bilingual EN/VI Standard)
+* Place/rename as DEFAULT.WDT or <project_name>.wdt in the project folder.
+* Left side = ACADE Project Description / Drawing Properties fields
+* Right side = Title Block Block Attribute Names (comma-separated if multiple)
+
+BLOCK = TITLE_BLOCK_A3_BILINGUAL
+
+LINE1 = PROJECT_NAME
+LINE2 = CLIENT_NAME
+LINE3 = PANEL_NAME
+LINE4 = VOLTAGE_RATING
+LINE5 = DESIGNED_BY
+LINE6 = CHECKED_BY
+LINE7 = APPROVED_BY
+LINE8 = REVISION
+LINE9 = MATERIAL_FINISH
+LINE10 = GENERAL_TOLERANCE
+
+DWGNAM = DWG_NO
+DWGSEC = SECTION_NO
+DWGSUB = SUBSECTION_NO
+SHDWGNAM = SHEET_NO
+SHEET = SHEET
+SHEETMAX = SHEET_TOTAL
+PLOTDATE = DATE
+PLOTTIME = TIME
+FULLFILENAME = FILE_PATH

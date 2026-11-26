@@ -1,0 +1,27 @@
+# Python / Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.mplcache/
+.pytest_cache/
+
+# Secrets & Local Env
+.env
+*.pem
+*.key
+*.pfx
+
+# CAD / AutoCAD / Inventor Temp & Lock Files
+*.bak
+*.dwl
+*.dwl2
+*.lck
+~$*
+_backup_unsaved/
+
+# OS & Logs
+*.log
+.DS_Store
+Thumbs.db

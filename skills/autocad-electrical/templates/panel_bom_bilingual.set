@@ -1,0 +1,28 @@
+; AutoCAD Electrical Report Format File (.set) - Panel BOM Bilingual (EN/VI)
+; Exported/configured via Reports tab -> Report Format Setup (AEREPORTFORMAT) -> Panel Bill of Materials
+(REPORT "PBOM"
+  (FORMAT "NORMAL")
+  (NAMELIST "")
+  (INST_NAMELIST "")
+  (LOC_NAMELIST "+MAIN_PNL,+DOOR")
+  (OPTIONS (INC_JUMPER "1") (INC_CABLE "0") (FULL_MIL "1"))
+  (FIELDS
+    (ITEM 1 6 "ITEM" "C")
+    (TAG 2 14 "TAG" "C")
+    (DESC1 3 36 "DESCRIPTION (EN)" "L")
+    (DESC2 4 36 "MÔ TẢ (VI)" "L")
+    (MFG 5 16 "MFG / HÃNG" "C")
+    (CAT 6 22 "CATALOG NO." "L")
+    (SUBQTY 7 8 "QTY" "C")
+    (LOC 8 12 "LOC" "C")
+  )
+  (SORT (F1 "ITEM" "A") (F2 "TAG" "A") (F3 "MFG" "A") (F4 "CAT" "A"))
+  (TBL
+    (STYLE "STANDARD")
+    (LAYER "PNL_BALLOON")
+    (TITLE "PANEL BILL OF MATERIALS / BẢNG TỔNG HỢP VẬT TƯ TỦ ĐIỆN")
+    (INSPT "230.0,265.0")
+    (TEXT_HT "2.2")
+    (ROWS "40")
+  )
+)

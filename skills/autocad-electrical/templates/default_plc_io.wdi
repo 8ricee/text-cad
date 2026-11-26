@@ -1,0 +1,20 @@
+* AutoCAD Electrical Spreadsheet to PLC I/O Utility Settings File (.wdi)
+* Matches templates/plc_io_import_template.csv column layout (Columns A..M)
+MOD_CODE = A
+BLK_NAME = B
+RACK = C
+SLOT = D
+ADDR = E
+DEV_TAG = F
+DESC1 = G
+DESC2 = H
+DESC3 = I
+TERMDESC = J
+WIRETYPE = K
+DEV_LOC = L
+DEV_INST = M
+LADDER_WIDTH = 100
+LADDER_DIST = 120
+SPREADSHEET_FORMAT = CSV
+SKIP_HEADER_ROWS = 1
+INSERT_SCALE = 1.0
