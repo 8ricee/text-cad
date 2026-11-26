@@ -869,11 +869,14 @@ def execute_native_manifest(manifest: dict, mdb_path: Path | None = None) -> dic
     wire_res = mcp.tool_acade_draw_smart_wires_and_arrows(manifest["wires_and_arrows_sheet_05"])
     sym_res = [mcp.tool_acade_insert_schematic_symbol(sym) for sym in manifest["schematic_symbols_sheet_05"]]
 
-    # Sheet 06: Open 06_plc_io_wiring.dwg -> Build PLC modules + wired I/O channels
+    # Sheet 06: Open 06_plc_io_wiring.dwg -> Build PLCIO modules + left-side wired I/O channels
     mcp.tool_autocad_open_or_new({"path": str(proj_dir / "06_plc_io_wiring.dwg")})
     plc_res = mcp.tool_acade_build_plc_from_csv({"csv_path": manifest["plc_io_csv"]})
 
-    # Sheet 07: Open 07_panel_layout.dwg -> Sync Panel Footprints (with VIA_WD_FP) if Scratch .mdb is available
+    # Pass 1: Rebuild Scratch DB (.mdb) BEFORE Panel Footprint Sync so [COMP] has all Sheet 05 & 06 components
+    mcp._run_acade_lisp_checked('(command "_AEREBUILDDB")', ["c:wd_insym2"], auto_save=True)
+
+    # Sheet 07: Open 07_panel_layout.dwg -> Sync Panel Footprints (now [COMP] is populated!)
     panel_res = None
     if mdb_path and mdb_path.exists():
         mcp.tool_autocad_open_or_new({"path": str(proj_dir / "07_panel_layout.dwg")})
@@ -891,6 +894,7 @@ def execute_native_manifest(manifest: dict, mdb_path: Path | None = None) -> dic
         )
         if (proj_dir / s).exists()
     ]
+    # Pass 2: Equipotential wire numbering (%S%N) + _AEREBUILDDB (populates PNLCOMP, WFRM2ALL, PLCIO, TERMS) + Title Block Update
     retag_res = mcp.tool_acade_run_reports_and_retag({"sheet_paths": sheet_paths})
     report_res = None
     audit_res = None

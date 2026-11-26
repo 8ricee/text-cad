@@ -700,18 +700,18 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
 
     lisp_parts: list[str] = []
     for mod_idx, ((rack, slot, code), ch_rows) in enumerate(modules.items()):
-        mx = 80.0 + mod_idx * 165.0
+        mx = 180.0 + mod_idx * 185.0
         my = 265.0
         mod_tag = f"-A1:S{slot}"
-        # Insert real ACADE PLCIO module header block (HP1W--L in Libs\iec-60617)
+        # Insert real ACADE PLCIO module header block (HP1W--L: TAG, LINE1, LINE2, MFG, CAT, LOC, INST)
         lisp_parts.append(
             f'(setq _pm (c:wd_insym2 "HP1W--L" \'({mx} {my} 0.0) 1.0 nil)) '
             f'(if _pm (progn '
-            f'(c:wd_modattrval _pm "TAGA_" {_lisp_str(mod_tag)} nil) '
+            f'(c:wd_modattrval _pm "TAG" {_lisp_str(mod_tag)} nil) '
+            f'(c:wd_modattrval _pm "LINE1" {_lisp_str(f"RACK {rack}")} nil) '
+            f'(c:wd_modattrval _pm "LINE2" {_lisp_str(f"SLOT {slot}")} nil) '
             f'(c:wd_modattrval _pm "MFG" "SIEMENS" nil) '
             f'(c:wd_modattrval _pm "CAT" {_lisp_str(code)} nil) '
-            f'(c:wd_modattrval _pm "RACK" {_lisp_str(rack)} nil) '
-            f'(c:wd_modattrval _pm "SLOT" {_lisp_str(slot)} nil) '
             f'(c:wd_modattrval _pm "LOC" "+MAIN_PNL" nil) '
             f'(c:wd_modattrval _pm "INST" "=PLC1" nil) '
             f'(entupd _pm)))'
@@ -722,26 +722,26 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
             tdesc = row.get("TERMDESC", "")
             wtype = row.get("WIRETYPE", "SIG_PLC_BU_0.5")
             blk = (row.get("BLOCK") or "").strip()
-            # 1. Draw I/O wire FIRST via c:wd_wire_quik from PLC channel X1TERM01
+            # 1. Draw I/O wire FIRST via c:wd_wire_quik from HP1WA-D X4TERM_ @ (mx - 7.0, cy) going LEFT
             lisp_parts.append(
                 f'(setvar "CLAYER" {_lisp_str(wtype)}) '
-                f'(c:wd_wire_quik \'({mx + 25.0} {cy} 0.0) \'({mx + 135.0} {cy} 0.0) nil)'
+                f'(c:wd_wire_quik \'({mx - 7.0} {cy} 0.0) \'({mx - 115.0} {cy} 0.0) nil)'
             )
-            # 2. Insert real PLCIO channel block (HP1WA-D) ON the wire start
+            # 2. Insert real PLCIO channel block (HP1WA-D: TAGA_=addr, TERM_, TERMDESC_, DESCA_, DESCB_)
             lisp_parts.append(
                 f'(setq _pc (c:wd_insym2 "HP1WA-D" \'({mx} {cy} 0.0) 1.0 nil)) '
                 f'(if _pc (progn '
-                f'(c:wd_modattrval _pc "TAGA_" {_lisp_str(mod_tag)} nil) '
+                f'(c:wd_modattrval _pc "TAGA_" {_lisp_str(addr)} nil) '
                 f'(c:wd_modattrval _pc "TERM_" {_lisp_str(tdesc)} nil) '
-                f'(c:wd_modattrval _pc "ADDR_" {_lisp_str(addr)} nil) '
-                f'(c:wd_modattrval _pc "DESC1" {_lisp_str(row.get("DESC1", ""))} nil) '
-                f'(c:wd_modattrval _pc "DESC2" {_lisp_str(row.get("DESC2", ""))} nil) '
+                f'(c:wd_modattrval _pc "TERMDESC_" {_lisp_str(tdesc)} nil) '
+                f'(c:wd_modattrval _pc "DESCA_" {_lisp_str(row.get("DESC1", ""))} nil) '
+                f'(c:wd_modattrval _pc "DESCB_" {_lisp_str(row.get("DESC2", ""))} nil) '
                 f'(entupd _pc)))'
             )
-            # 3. Insert peripheral symbol ON the wire (skip if blank, e.g., Analog %IW64)
+            # 3. Insert peripheral symbol ON the left-side wire (skip if blank, e.g., Analog %IW64)
             if blk:
                 lisp_parts.append(
-                    f'(setq _pe (c:wd_insym2 {_lisp_str(blk)} \'({mx + 92.0} {cy} 0.0) 1.0 nil)) '
+                    f'(setq _pe (c:wd_insym2 {_lisp_str(blk)} \'({mx - 60.0} {cy} 0.0) 1.0 nil)) '
                     f'(if _pe (progn '
                     f'(c:wd_modattrval _pe "TAG1" {_lisp_str(row.get("TAG", ""))} nil) '
                     f'(c:wd_modattrval _pe "DESC1" {_lisp_str(row.get("DESC1", ""))} nil) '
@@ -849,22 +849,47 @@ $conn.Close()
 
 
 def tool_acade_run_reports_and_retag(args: dict[str, Any]) -> dict[str, Any]:
-    """Place non-modal WD_WNH/WD_WNV wire-number blocks on unnumbered wires, rebuild DB, retag, and update Title Block across sheets."""
+    """Place equipotential %S%N WD_WNH/WD_WNV wire-number blocks (reading WD_M SHEET, grouping connected segments), rebuild DB, retag, and update Title Block."""
     sheet_paths = args.get("sheet_paths") or []
-    # Non-modal wire numbering: scan LINEs on wire layers, insert WD_WNH/WD_WNV at midpoint if no WD_WN* nearby
+    # Read real SHEET attribute from WD_M, group connected LINE segments into equipotential nets, skip fixed arrows & already-numbered nets
     wnum_lisp = (
-        '(setq _wss (ssget "X" \'((0 . "LINE") (8 . "PWR_*,CTRL_*,SIG_*,SAFE_*")))) '
-        '(if _wss (progn (setq _wi 0 _wn 1) (while (< _wi (sslength _wss)) '
+        '(defun _wdm_sheet (/ ss e n d sh) (setq sh "01") '
+        '(if (setq ss (ssget "X" \'((0 . "INSERT") (2 . "WD_M")))) '
+        '(progn (setq e (ssname ss 0) n (entnext e)) '
+        '(while (and n (= (cdr (assoc 0 (entget n))) "ATTRIB")) '
+        '(setq d (entget n)) (if (= (strcase (cdr (assoc 2 d))) "SHEET") (setq sh (cdr (assoc 1 d)))) '
+        '(setq n (entnext n))))) sh) '
+        '(defun _ptk (p) (strcat (rtos (car p) 2 1) "," (rtos (cadr p) 2 1))) '
+        '(setq _sh (_wdm_sheet) _wss (ssget "X" \'((0 . "LINE") (8 . "PWR_*,CTRL_*,SIG_*,SAFE_*")))) '
+        '(if _wss (progn (setq _segs nil _wi 0) '
+        '(while (< _wi (sslength _wss)) '
         '(setq _we (entget (ssname _wss _wi)) _p1 (cdr (assoc 10 _we)) _p2 (cdr (assoc 11 _we)) '
-        '_mx (/ (+ (car _p1) (car _p2)) 2.0) _my (/ (+ (cadr _p1) (cadr _p2)) 2.0) '
-        '_blk (if (> (abs (- (car _p2) (car _p1))) (abs (- (cadr _p2) (cadr _p1)))) "WD_WNH" "WD_WNV") '
-        '_sh (cond ((setq _ws (ssget "X" \'((0 . "INSERT") (2 . "WD_M")))) '
-        '(cdr (assoc 1 (entget (entnext (ssname _ws 0)))))) (T "01")) '
-        '_wno (strcat (if (< _wn 10) "0" "") (itoa _wn))) '
-        '(if (not (ssget "C" (list (- _mx 4.0) (- _my 4.0)) (list (+ _mx 4.0) (+ _my 4.0)) \'((0 . "INSERT") (2 . "WD_WN*")))) '
-        '(progn (setq _wb (c:wd_insym2 _blk (list _mx _my 0.0) 1.0 nil)) '
-        '(if _wb (progn (c:wd_modattrval _wb "WIRENO" _wno nil) (entupd _wb))) (setq _wn (1+ _wn)))) '
-        '(setq _wi (1+ _wi)))))'
+        '_segs (cons (list (_ptk _p1) (_ptk _p2) _p1 _p2) _segs) _wi (1+ _wi))) '
+        '(setq _visited nil _wn 1) '
+        '(foreach _s _segs '
+        '(if (not (member (car _s) _visited)) '
+        '(progn (setq _queue (list (car _s) (cadr _s)) _net nil _has_num nil) '
+        '(while _queue (setq _cur (car _queue) _queue (cdr _queue)) '
+        '(if (not (member _cur _visited)) '
+        '(progn (setq _visited (cons _cur _visited)) '
+        '(foreach _cand _segs '
+        '(if (or (= (car _cand) _cur) (= (cadr _cand) _cur)) '
+        '(progn (setq _net (cons _cand _net)) '
+        '(if (not (member (car _cand) _visited)) (setq _queue (cons (car _cand) _queue))) '
+        '(if (not (member (cadr _cand) _visited)) (setq _queue (cons (cadr _cand) _queue))))))))) '
+        '(foreach _ns _net '
+        '(setq _np1 (caddr _ns) _np2 (cadddr _ns) _mx (/ (+ (car _np1) (car _np2)) 2.0) _my (/ (+ (cadr _np1) (cadr _np2)) 2.0)) '
+        '(if (or (ssget "C" (list (- _mx 4.0) (- _my 4.0)) (list (+ _mx 4.0) (+ _my 4.0)) \'((0 . "INSERT") (2 . "WD_WN*"))) '
+        '(ssget "C" (list (- (car _np1) 2.0) (- (cadr _np1) 2.0)) (list (+ (car _np1) 2.0) (+ (cadr _np1) 2.0)) \'((0 . "INSERT") (2 . "HA1*"))) '
+        '(ssget "C" (list (- (car _np2) 2.0) (- (cadr _np2) 2.0)) (list (+ (car _np2) 2.0) (+ (cadr _np2) 2.0)) \'((0 . "INSERT") (2 . "HA1*")))) '
+        '(setq _has_num T))) '
+        '(if (and (not _has_num) _net) '
+        '(progn (setq _rep (car _net) _rp1 (caddr _rep) _rp2 (cadddr _rep) '
+        '_mx (/ (+ (car _rp1) (car _rp2)) 2.0) _my (/ (+ (cadr _rp1) (cadr _rp2)) 2.0) '
+        '_blk (if (> (abs (- (car _rp2) (car _rp1))) (abs (- (cadr _rp2) (cadr _rp1)))) "WD_WNH" "WD_WNV") '
+        '_wno (strcat _sh (if (< _wn 10) "0" "") (itoa _wn)) '
+        '_wb (c:wd_insym2 _blk (list _mx _my 0.0) 1.0 nil)) '
+        '(if _wb (progn (c:wd_modattrval _wb "WIRENO" _wno nil) (entupd _wb))) (setq _wn (1+ _wn)))))))))'
     )
     lisp_body = (
         '(setvar "FILEDIA" 0) '
@@ -890,7 +915,7 @@ def tool_acade_run_reports_and_retag(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def tool_acade_place_db_reports_on_drawing(args: dict[str, Any]) -> dict[str, Any]:
-    """Query live Project Scratch .mdb (COMP, PNLCOMP, WFRM2ALL+WIRETYPE, PLCIO, TERMS) and place dynamic AcDbTable on active drawing."""
+    """Query live Project Scratch .mdb (BOM rollup by MFG+CAT+ASSYCODE, WIRE_FROM_TO+WIRETYPE, PLCIO, TERMS) and place dynamic AcDbTable."""
     mdb_path = Path(args["mdb_path"]).resolve()
     report_type = args.get("report_type", "BOM").upper()
     insert_pt = args.get("insert") or [232.0, 280.0, 0.0]
@@ -900,17 +925,17 @@ def tool_acade_place_db_reports_on_drawing(args: dict[str, Any]) -> dict[str, An
     mdb_str = str(mdb_path).replace("'", "''")
     if report_type == "BOM":
         sql = (
-            "SELECT TAGNAME, DESC1, MFG, CAT, COUNT(*) AS QTY, LOC "
-            "FROM [COMP] WHERE PAR1_CHLD2='1' AND TAGNAME IS NOT NULL AND TAGNAME<>'' "
-            "GROUP BY TAGNAME, DESC1, MFG, CAT, LOC ORDER BY LOC, TAGNAME"
+            "SELECT MFG, CAT, ASSYCODE, MAX(DESC1) AS DESCR, COUNT(*) AS QTY, MAX(LOC) AS LOCS "
+            "FROM [COMP] WHERE PAR1_CHLD2='1' AND CAT IS NOT NULL AND CAT<>'' "
+            "GROUP BY MFG, CAT, ASSYCODE ORDER BY MFG, CAT"
         )
-        headers = ["TAG", "DESCRIPTION", "MFG", "CATALOG NO.", "QTY", "LOC"]
+        headers = ["MFG", "CATALOG NO.", "DESCRIPTION", "QTY", "LOC"]
     elif report_type == "WIRE_FROM_TO":
         sql = (
-            "SELECT w.WIRENO, w.NAM1, w.PIN1, w.NAM2, w.PIN2, w.WLAY1 "
-            "FROM [WFRM2ALL] w ORDER BY w.WIRENO"
+            "SELECT w.WIRENO, w.NAM1, w.PIN1, w.NAM2, w.PIN2, wt.WIRECOLOR, wt.WIRESIZE, w.WLAY1 "
+            "FROM [WFRM2ALL] w LEFT JOIN [WIRETYPE] wt ON w.WLAY1 = wt.LAYNAME ORDER BY w.WIRENO"
         )
-        headers = ["WIRE NO", "FROM TAG", "PIN1", "TO TAG", "PIN2", "WIRE LAYER"]
+        headers = ["WIRE NO", "FROM TAG", "PIN1", "TO TAG", "PIN2", "COLOR", "SIZE", "LAYER"]
     elif report_type == "PLCIO":
         sql = "SELECT TAGNAME, ADDR, TERM, TERMDESC, DESCA FROM [PLCIO] ORDER BY TAGNAME, ADDR"
         headers = ["PLC TAG", "ADDRESS", "TERM", "TERMDESC", "DESCRIPTION"]
@@ -940,7 +965,18 @@ $conn.Close()
 @{{ rows = $rows }} | ConvertTo-Json -Depth 4 -Compress
 """
     data_res = _run_ps(ps, timeout=30)
-    db_rows = data_res.get("rows") or []
+    raw_rows = data_res.get("rows") or []
+
+    if report_type == "BOM":
+        db_rows: list[list[str]] = []
+        for r in raw_rows:
+            mfg, cat, assy, descr, qty_s, loc = r
+            db_rows.append([mfg, cat, descr, qty_s, loc])
+            if assy:
+                for sub_cat in [s.strip() for s in assy.split(";") if s.strip()]:
+                    db_rows.append([mfg, sub_cat, f"ACCESSORY FOR {cat} (ASSYCODE)", qty_s, loc])
+    else:
+        db_rows = raw_rows
     table_data = [headers] + db_rows
     if len(table_data) == 1:
         return {"report_type": report_type, "rows": 0, "placed": False}
