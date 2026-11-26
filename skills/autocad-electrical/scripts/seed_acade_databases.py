@@ -162,7 +162,7 @@ def convert_dxf_to_dwg(dxf_path: Path, dwg_path: Path) -> Path:
         raise FileNotFoundError(f"accoreconsole.exe not found: {accore}")
     scr = dxf_path.with_suffix(".scr")
     dwg_posix = dwg_path.as_posix()
-    scr.write_text(f'(setvar "FILEDIA" 0)\n(setvar "EXPERT" 5)\n_.SAVEAS\n2018\n{dwg_posix}\n_QUIT _Y\n', encoding="ascii")
+    scr.write_text(f'(setvar "FILEDIA" 0)\n(setvar "EXPERT" 5)\n_.SAVEAS\n2018\n"{dwg_posix}"\n_QUIT _Y\n', encoding="ascii")
     proc = subprocess.run([str(accore), "/i", str(dxf_path), "/s", str(scr), "/l", "en-US"], capture_output=True, text=True, timeout=30)
     scr.unlink(missing_ok=True)
     if proc.returncode != 0 or not dwg_path.exists():
@@ -250,7 +250,7 @@ def seed_footprint_mdb(fp_mdb: Path, fp_csv: Path, panel_dir: Path) -> dict[str,
         mnt = row.get("MOUNT_TYPE", "").strip()
         if not mfg or not cat:
             continue
-        blknam = _sql_esc(f"PNL_{mfg}_{cat}".replace("-", "_"))
+        blknam = _sql_esc(f"PNL_{mfg.replace(' ', '_')}_{cat}".replace("-", "_"))
         _build_panel_footprint_dwg_if_missing(panel_dir, mfg, blknam, row)
         rel_blk = _sql_esc(f"CUSTOM/{mfg}/{blknam}")
         desc = _sql_esc(f"{w}x{h}mm {mnt}")

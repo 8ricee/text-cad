@@ -797,7 +797,7 @@ $conn.Close()
             mfg = (comp.get("mfg") or "SIEMENS").upper()
             cat_raw = (comp.get("cat") or "").upper()
             cat_clean = cat_raw.replace("-", "_")
-            dwg_path = panel_root / mfg / f"PNL_{mfg}_{cat_clean}.dwg"
+            dwg_path = panel_root / mfg / f"PNL_{mfg.replace(' ', '_')}_{cat_clean}.dwg"
             if not dwg_path.exists():
                 continue
             x = 120.0 + (idx % 4) * 180.0
