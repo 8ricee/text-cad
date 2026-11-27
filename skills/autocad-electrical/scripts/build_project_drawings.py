@@ -821,7 +821,7 @@ def build_native_acade_project_manifest(project_dir: Path, project_name: str = "
         "schematic_symbols_sheet_05": [
             {"block_name": "VFU1_S00371", "point": [100.0, 250.0], "attributes": {"TAG1": "-F1", "MFG": "SIEMENS", "CAT": "3NW7031", "LOC": "+MAIN_PNL", "DESC1": "PHASE FUSE 3P 2A"}},
             {"block_name": "VCB11Q13", "point": [142.0, 250.0], "attributes": {"TAG1": "-Q3", "MFG": "SIEMENS", "CAT": "5SL6210-7", "LOC": "+MAIN_PNL", "DESC1": "MCB 2P 10A PSU"}},
-            {"block_name": "VMS2NA13F", "point": [45.0, 240.0], "attributes": {"TAG1": "-Q2", "MFG": "SIEMENS", "CAT": "3RV2021-4AA10", "LOC": "+MAIN_PNL", "DESC1": "MPCB VFD 16A"}},
+            {"block_name": "VCB11Q13", "point": [45.0, 240.0], "attributes": {"TAG1": "-Q2", "MFG": "SIEMENS", "CAT": "3RV2021-4AA10", "LOC": "+MAIN_PNL", "DESC1": "MPCB VFD 16A"}},
             {"block_name": "VCR1", "point": [295.0, 240.0], "attributes": {"TAG1": "-K1", "MFG": "SIEMENS", "CAT": "3RT2026-1BB40", "LOC": "+MAIN_PNL", "DESC1": "CONVEYOR CONTACTOR COIL", "ASSYCODE": "AUX_3RH2911_2NO2NC;DIODE_3RT2926"}},
             {"block_name": "VCR21", "point": [45.0, 210.0], "attributes": {"TAG2": "-K1", "TERM01": "1", "TERM02": "2", "LOC": "+MAIN_PNL", "DESC1": "CONTACTOR POLE L1"}},
             {"block_name": "VCR21", "point": [60.0, 210.0], "attributes": {"TAG2": "-K1", "TERM01": "3", "TERM02": "4", "LOC": "+MAIN_PNL", "DESC1": "CONTACTOR POLE L2"}},
@@ -905,7 +905,7 @@ def execute_native_manifest(manifest: dict, mdb_path: Path | None = None) -> dic
         wire_tbl = mcp.tool_acade_place_db_reports_on_drawing({"mdb_path": str(mdb_path), "report_type": "WIRE_FROM_TO", "insert": [25.0, 275.0, 0.0]})
         term_tbl = mcp.tool_acade_place_db_reports_on_drawing({"mdb_path": str(mdb_path), "report_type": "TERMINAL_PLAN", "insert": [230.0, 275.0, 0.0]})
         report_res = {"bom": bom_tbl, "wire_from_to": wire_tbl, "terminal_plan": term_tbl}
-        audit_res = mcp.tool_acade_electrical_audit({"mdb_path": str(mdb_path)})
+        audit_res = mcp.tool_acade_electrical_audit({"mdb_path": str(mdb_path), "project_dir": str(proj_dir)})
     return {
         "init": init_res,
         "wires": wire_res,

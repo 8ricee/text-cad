@@ -24,11 +24,102 @@ PROTOCOL_VERSION = "2024-11-05"
 
 SKILL_ROOT = Path(r"C:\Users\Gaadz\.gemini\config\skills\autocad-electrical")
 TEMPLATE_DWT = SKILL_ROOT / "templates" / "TEMPLATE_IEC_A3.dwt"
+TEMPLATE_PANEL_DWT = SKILL_ROOT / "templates" / "TEMPLATE_PANEL_LAYOUT_A3.dwt"
 TEMPLATE_WDP = SKILL_ROOT / "templates" / "TEMPLATE_PROJECT.wdp"
 DEFAULT_WDI = SKILL_ROOT / "templates" / "default_plc_io.wdi"
 DEFAULT_RGF = SKILL_ROOT / "templates" / "project_master_reports.rgf"
 AUDIT_SCRIPT = SKILL_ROOT / "scripts" / "acade_electrical_audit.py"
 SEED_SCRIPT = SKILL_ROOT / "scripts" / "seed_acade_databases.py"
+
+MFG_ALIASES = {
+    "PHOENIX": "PHOENIX CONTACT",
+    "PHOENIX_CONTACT": "PHOENIX CONTACT",
+    "SCHNEIDER": "SCHNEIDER ELECTRIC",
+    "TELEMECANIQUE": "SCHNEIDER ELECTRIC",
+    "ALLEN-BRADLEY": "AB",
+    "ALLEN BRADLEY": "AB",
+}
+
+
+def _normalize_mfg(mfg: str) -> str:
+    m = (mfg or "SIEMENS").strip().upper()
+    return MFG_ALIASES.get(m, m)
+
+
+def _parse_wdp_metadata(wdp_path: Path) -> tuple[dict[str, str], list[str]]:
+    """Parse *[1]..*[10] descriptions and ordered .dwg sheet basenames from a .wdp file."""
+    descs: dict[str, str] = {}
+    sheets: list[str] = []
+    if not wdp_path.exists():
+        return descs, sheets
+    for raw in wdp_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        ln = raw.strip()
+        if not ln:
+            continue
+        if ln.startswith("*[") and "]" in ln:
+            idx_s, val = ln[2:].split("]", 1)
+            if idx_s.isdigit():
+                descs[f"LINE{idx_s}"] = val.strip()
+        elif not ln.startswith(("*", "+", "?", "=")) and ln.lower().endswith(".dwg"):
+            sheets.append(Path(ln).name)
+    return descs, sheets
+
+
+def _build_titleblock_attr_map(
+    descs: dict[str, str],
+    dwg_path: Path,
+    sheet_idx_1based: int,
+    sheet_total: int,
+    sub: str = "SCH",
+) -> dict[str, str]:
+    import datetime as _dt
+
+    sh_str = f"{sheet_idx_1based:02d}"
+    tot_str = f"{max(1, sheet_total):02d}"
+    now = _dt.datetime.now()
+    return {
+        "PROJECT_NAME": descs.get("LINE1") or dwg_path.parent.name,
+        "CLIENT_NAME": descs.get("LINE2") or "INDUSTRIAL AUTOMATION",
+        "PANEL_NAME": descs.get("LINE3") or "MAIN CONTROL PANEL",
+        "VOLTAGE_RATING": descs.get("LINE4") or "3P 400VAC / 24VDC PELV",
+        "DESIGNED_BY": descs.get("LINE5") or "GAADZ ENG.",
+        "CHECKED_BY": descs.get("LINE6") or "LEAD ENG.",
+        "APPROVED_BY": descs.get("LINE7") or "QA",
+        "REVISION": descs.get("LINE8") or "REV A",
+        "MATERIAL_FINISH": descs.get("LINE9") or "RAL7035",
+        "GENERAL_TOLERANCE": descs.get("LINE10") or "ISO 2768-m",
+        "DWG_NO": dwg_path.stem,
+        "SHEET": sh_str,
+        "SHEET_NO": sh_str,
+        "SHEET_TOTAL": tot_str,
+        "SUBSECTION_NO": sub[:8],
+        "DATE": now.strftime("%Y-%m-%d"),
+        "TIME": now.strftime("%H:%M"),
+        "FILE_PATH": dwg_path.name,
+    }
+
+
+def _lisp_sync_wdm_and_titleblock(sh_str: str, tb_attrs: dict[str, str]) -> str:
+    """Deterministic AutoLISP updater for WD_M.SHEET and TITLE_BLOCK_A3_BILINGUAL (in ModelSpace or PaperSpace)."""
+    pairs = " ".join(f'(cons {_lisp_str(k.upper())} {_lisp_str(v)})' for k, v in tb_attrs.items())
+    return (
+        f'(setq _tbmap (list {pairs})) '
+        f'(if (setq _wmss (ssget "X" \'((0 . "INSERT") (2 . "WD_M")))) '
+        f'(progn (setq _wi 0) (while (< _wi (sslength _wmss)) '
+        f'(setq _we (ssname _wmss _wi) _wn (entnext _we)) '
+        f'(while (and _wn (= (cdr (assoc 0 (entget _wn))) "ATTRIB")) '
+        f'(setq _wd (entget _wn)) '
+        f'(if (= (strcase (cdr (assoc 2 _wd))) "SHEET") '
+        f'(entmod (subst (cons 1 {_lisp_str(sh_str)}) (assoc 1 _wd) _wd))) '
+        f'(setq _wn (entnext _wn))) (entupd _we) (setq _wi (1+ _wi))))) '
+        f'(if (setq _tbss (ssget "X" \'((0 . "INSERT") (2 . "TITLE_BLOCK_A3_BILINGUAL")))) '
+        f'(progn (setq _ti 0) (while (< _ti (sslength _tbss)) '
+        f'(setq _te (ssname _tbss _ti) _tn (entnext _te)) '
+        f'(while (and _tn (= (cdr (assoc 0 (entget _tn))) "ATTRIB")) '
+        f'(setq _td (entget _tn) _tk (strcase (cdr (assoc 2 _td))) _tv (cdr (assoc _tk _tbmap))) '
+        f'(if _tv (entmod (subst (cons 1 _tv) (assoc 1 _td) _td))) '
+        f'(setq _tn (entnext _tn))) (entupd _te) (setq _ti (1+ _ti)))))'
+    )
 
 
 def _lisp_acade_load() -> str:
@@ -533,7 +624,7 @@ for ($i = 0; $i -lt $lim; $i++) {
 
 
 def tool_acade_project_init(args: dict[str, Any]) -> dict[str, Any]:
-    """Initialize a native .wdp project, copy sheets from TEMPLATE_IEC_A3.dwt, activate it, and rebuild Scratch DB."""
+    """Initialize a native .wdp project, create schematic/panel .dwg sheets from matching .dwt, stamp WD_M.SHEET & Title Block, and rebuild Scratch DB."""
     project_dir = Path(args["project_dir"]).resolve()
     project_name = args["project_name"].strip()
     sheets = args.get("sheets") or [
@@ -541,10 +632,11 @@ def tool_acade_project_init(args: dict[str, Any]) -> dict[str, Any]:
         {"file": "04_power_distribution.dwg", "desc": "POWER DISTRIBUTION SCHEMATIC"},
         {"file": "05_control_schematic.dwg", "desc": "CONTROL & LOAD CELL SCHEMATIC"},
         {"file": "06_plc_io_wiring.dwg", "desc": "PLC I/O WIRING"},
-        {"file": "07_panel_layout.dwg", "desc": "PANEL LAYOUT"},
+        {"file": "07_panel_layout.dwg", "desc": "PANEL LAYOUT", "sub": "PANEL"},
         {"file": "09_terminal_and_cable_list.dwg", "desc": "TERMINAL & CABLE LIST"},
     ]
     template_dwt = Path(args.get("template_dwt") or TEMPLATE_DWT).resolve()
+    panel_dwt = Path(args.get("panel_template_dwt") or (TEMPLATE_PANEL_DWT if TEMPLATE_PANEL_DWT.exists() else template_dwt)).resolve()
     template_wdp = Path(args.get("template_wdp") or TEMPLATE_WDP).resolve()
     if not template_dwt.exists():
         raise FileNotFoundError(f"Template DWT not found: {template_dwt}")
@@ -556,7 +648,8 @@ def tool_acade_project_init(args: dict[str, Any]) -> dict[str, Any]:
     base_lines = template_wdp.read_text(encoding="utf-8", errors="replace").splitlines()
     header_lines = [ln for ln in base_lines if ln.startswith(("*", "+", "?"))]
 
-    descriptions = args.get("descriptions") or {}
+    descriptions = dict(args.get("descriptions") or {})
+    descriptions.setdefault("LINE1", project_name.replace("_", " ").upper())
     for idx in range(1, 11):
         key = f"LINE{idx}"
         if key in descriptions:
@@ -564,24 +657,40 @@ def tool_acade_project_init(args: dict[str, Any]) -> dict[str, Any]:
             header_lines = [ln for ln in header_lines if not ln.startswith(prefix)]
             header_lines.insert(idx - 1, f"{prefix}{descriptions[key]}")
 
-    for s in sheets:
+    sheet_specs: list[dict[str, Any]] = []
+    total_sheets = len(sheets)
+    for idx0, s in enumerate(sheets):
         fname = s["file"] if s["file"].lower().endswith(".dwg") else f"{s['file']}.dwg"
+        fl = fname.lower()
+        is_panel = (
+            str(s.get("sub", "")).upper() == "PANEL"
+            or "panel" in fl
+            or "-lay-" in fl
+            or "_lay_" in fl
+        )
+        sub = s.get("sub") or ("PANEL" if is_panel else "SCHEMATIC")
         s_desc = s.get("desc", fname)
-        sub = s.get("sub", "PANEL" if "panel" in fname.lower() else "SCHEMATIC")
         header_lines.extend([f"==={s_desc}", f"=====SUB={sub}", fname])
+        sp_path = (project_dir / fname).resolve()
+        tb_map = _build_titleblock_attr_map(descriptions, sp_path, idx0 + 1, total_sheets, sub=sub)
+        sheet_specs.append({
+            "path": str(sp_path),
+            "dwt": str(panel_dwt if is_panel else template_dwt),
+            "sheet_no": f"{idx0 + 1:02d}",
+            "tb": tb_map,
+        })
 
     wdp_path.write_text("\n".join(header_lines) + "\n", encoding="utf-8")
 
-    # Copy WDT mapping alongside .wdp
     wdt_src = SKILL_ROOT / "templates" / "default_iec_bilingual.wdt"
     if wdt_src.exists():
-        (project_dir / f"{project_name}.wdt").write_text(wdt_src.read_text(encoding="utf-8"), encoding="utf-8")
+        wdt_txt = wdt_src.read_text(encoding="utf-8")
+        (project_dir / f"{project_name}.wdt").write_text(wdt_txt, encoding="utf-8")
+        (project_dir / "DEFAULT.WDT").write_text(wdt_txt, encoding="utf-8")
 
-    sheet_paths = [str((project_dir / (s["file"] if s["file"].lower().endswith(".dwg") else f"{s['file']}.dwg")).resolve()) for s in sheets]
     payload_q = _ps_quote(json.dumps({
-        "template_dwt": str(template_dwt),
         "wdp_path": str(wdp_path).replace("\\", "/"),
-        "sheets": sheet_paths,
+        "sheet_specs": sheet_specs,
         "load_lisp": _lisp_acade_load(),
     }))
     ps = f"""
@@ -589,15 +698,40 @@ $ErrorActionPreference = 'Stop'
 $payload = ConvertFrom-Json {payload_q}
 $acad = [Runtime.InteropServices.Marshal]::GetActiveObject('AutoCAD.Application')
 $created = @()
-foreach ($sp in $payload.sheets) {{
+foreach ($spec in $payload.sheet_specs) {{
+    $sp = [string]$spec.path
     if (-not (Test-Path $sp)) {{
-        $d = $acad.Documents.Add($payload.template_dwt)
-        $d.SaveAs($sp)
-        $d.Close($false)
-        $created += $sp
+        $d = $acad.Documents.Add([string]$spec.dwt)
+    }} else {{
+        $d = $acad.Documents.Open($sp)
     }}
+    foreach ($space in @($d.ModelSpace, $d.PaperSpace)) {{
+        foreach ($ent in $space) {{
+            if ($ent.ObjectName -eq 'AcDbBlockReference') {{
+                $bn = [string]$ent.EffectiveName
+                if ($bn -eq 'WD_M') {{
+                    foreach ($att in $ent.GetAttributes()) {{
+                        if ($att.TagString.ToUpper() -eq 'SHEET') {{ $att.TextString = [string]$spec.sheet_no }}
+                    }}
+                }} elseif ($bn -eq 'TITLE_BLOCK_A3_BILINGUAL') {{
+                    foreach ($att in $ent.GetAttributes()) {{
+                        $k = $att.TagString.ToUpper()
+                        $v = $spec.tb.$k
+                        if ($null -ne $v) {{ $att.TextString = [string]$v }}
+                    }}
+                }}
+            }}
+        }}
+    }}
+    if (-not (Test-Path $sp)) {{
+        $d.SaveAs($sp)
+        $created += $sp
+    }} else {{
+        $d.Save()
+    }}
+    $d.Close($false)
 }}
-$first = $payload.sheets[0]
+$first = [string]$payload.sheet_specs[0].path
 $doc = $acad.Documents.Open($first)
 $doc.Activate()
 $wdpLisp = $payload.wdp_path
@@ -605,22 +739,83 @@ $cmd = $payload.load_lisp + '(command "_AEOPENPROJECT" "' + $wdpLisp + '") (if (
 $doc.SendCommand($cmd)
 @{{ wdp = $payload.wdp_path; created_dwgs = $created; active = $doc.FullName }} | ConvertTo-Json -Compress
 """
-    return _run_ps(ps, timeout=60)
+    return _run_ps(ps, timeout=75)
 
 
 def tool_acade_insert_schematic_symbol(args: dict[str, Any]) -> dict[str, Any]:
-    """Insert a real IEC-60617 schematic symbol via (c:wd_insym2) and populate TAG/MFG/CAT/LOC/INST/DESC/TERM."""
-    block_name = args["block_name"]
+    """Insert a real IEC-60617 schematic symbol via (c:wd_insym2), enforce IEC 81346 family & Parent/Child guards, and auto-break crossed wires."""
+    block_name = str(args["block_name"]).strip()
+    bn_up = block_name.upper().removesuffix(".DWG")
     pt = args["point"]
     scale = float(args.get("scale", 1.0))
-    attrs = args.get("attributes") or {}
+    attrs = dict(args.get("attributes") or {})
     auto_save = bool(args.get("auto_save", True))
 
+    # Guard 1: Prevent Child contact blocks (4th char == '2', e.g. VMS2NA13F, VCR21, VW02) from receiving TAG1 without TAG2
+    is_child_blk = (len(bn_up) >= 4 and bn_up[0] in ("H", "V") and bn_up[3] == "2") or bn_up in ("VW02", "HW02")
+    if is_child_blk and "TAG1" in attrs and "TAG2" not in attrs:
+        raise ValueError(
+            f"IEC Parent/Child Violation: '{block_name}' is a Child symbol (4th char='2', uses TAG2), "
+            f"but 'TAG1={attrs['TAG1']}' was passed! Use a Parent symbol (4th char='1', e.g., VCB11Q13 or VMS1NA21F) "
+            f"for Parent devices, or pass 'TAG2' if placing a Child contact."
+        )
+
+    # Guard 2: Prevent relay coil VCR1/HCR1 misuse for VFD (-U*), Power Supply (-G*), or PLC/Switch/HMI (-A*)
+    raw_tag = str(attrs.get("TAG1") or attrs.get("TAG2") or "").strip().upper().lstrip("-=+")
+    # Strip optional leading sheet digits (e.g. "04G1" -> "G1")
+    tag_alpha = raw_tag.lstrip("0123456789")
+    if bn_up in ("VCR1", "HCR1") and tag_alpha[:1] in ("U", "G", "A"):
+        raise ValueError(
+            f"IEC 60617 Symbol Misuse: Relay coil '{block_name}' cannot represent '{attrs.get('TAG1')}' (family '{tag_alpha[:1]}'). "
+            f"Use 'VU1_VFD_3P' for VFDs (-U*), 'VG1_PSU_24V' for Power Supplies (-G*), 'VA4_NET_BOX' / 'VA1_WEIGH_TRANS' / 'HP1W--L' for Modules (-A*)."
+        )
+
     mod_exprs = [f'(c:wd_modattrval _ent {_lisp_str(k)} {_lisp_str(v)} nil)' for k, v in attrs.items()]
+    # Auto-break any existing wire LINE piercing straight across opposite X2TERM/X8TERM or X4TERM/X1TERM pins of _ent
+    trim_wire_lisp = (
+        '(setq _p2 nil _p8 nil _p4 nil _p1 nil _an (entnext _ent)) '
+        '(while (and _an (= (cdr (assoc 0 (entget _an))) "ATTRIB")) '
+        '(setq _ad (entget _an) _at (strcase (cdr (assoc 2 _ad))) _ap (cdr (assoc 10 _ad))) '
+        '(cond ((wcmatch _at "X2TERM*") (setq _p2 (cons _ap _p2))) '
+        '((wcmatch _at "X8TERM*") (setq _p8 (cons _ap _p8))) '
+        '((wcmatch _at "X4TERM*") (setq _p4 (cons _ap _p4))) '
+        '((wcmatch _at "X1TERM*") (setq _p1 (cons _ap _p1)))) '
+        '(setq _an (entnext _an))) '
+        # Vertical wire split if symbol has both X2TERM (top) and X8TERM (bottom) at matching X
+        '(foreach _t2 _p2 (foreach _t8 _p8 '
+        '(if (< (abs (- (car _t2) (car _t8))) 0.25) '
+        '(progn (setq _vx (car _t2) _vyhi (max (cadr _t2) (cadr _t8)) _vylo (min (cadr _t2) (cadr _t8)) '
+        '_wss (ssget "C" (list (- _vx 0.3) _vylo) (list (+ _vx 0.3) _vyhi) \'((0 . "LINE") (8 . "PWR_*,CTRL_*,SIG_*,SAFE_*")))) '
+        '(if _wss (progn (setq _wi 0) (while (< _wi (sslength _wss)) '
+        '(setq _wl (ssname _wss _wi) _wd (entget _wl) _la (cdr (assoc 8 _wd)) '
+        '_lp1 (cdr (assoc 10 _wd)) _lp2 (cdr (assoc 11 _wd))) '
+        '(if (and (< (abs (- (car _lp1) _vx)) 0.25) (< (abs (- (car _lp2) _vx)) 0.25) '
+        '(> (max (cadr _lp1) (cadr _lp2)) (+ _vylo 0.2)) (< (min (cadr _lp1) (cadr _lp2)) (- _vyhi 0.2))) '
+        '(progn (setq _lymax (max (cadr _lp1) (cadr _lp2)) _lymin (min (cadr _lp1) (cadr _lp2))) '
+        '(entdel _wl) '
+        '(if (> _lymax (+ _vyhi 0.2)) (entmake (list \'(0 . "LINE") (cons 8 _la) (list 10 _vx _lymax 0.0) (list 11 _vx _vyhi 0.0)))) '
+        '(if (< _lymin (- _vylo 0.2)) (entmake (list \'(0 . "LINE") (cons 8 _la) (list 10 _vx _vylo 0.0) (list 11 _vx _lymin 0.0)))))) '
+        '(setq _wi (1+ _wi))))))))) '
+        # Horizontal wire split if symbol has both X4TERM (left) and X1TERM (right) at matching Y
+        '(foreach _t4 _p4 (foreach _t1 _p1 '
+        '(if (< (abs (- (cadr _t4) (cadr _t1))) 0.25) '
+        '(progn (setq _hy (cadr _t4) _hxhi (max (car _t4) (car _t1)) _hxlo (min (car _t4) (car _t1)) '
+        '_wss (ssget "C" (list _hxlo (- _hy 0.3)) (list _hxhi (+ _hy 0.3)) \'((0 . "LINE") (8 . "PWR_*,CTRL_*,SIG_*,SAFE_*")))) '
+        '(if _wss (progn (setq _wi 0) (while (< _wi (sslength _wss)) '
+        '(setq _wl (ssname _wss _wi) _wd (entget _wl) _la (cdr (assoc 8 _wd)) '
+        '_lp1 (cdr (assoc 10 _wd)) _lp2 (cdr (assoc 11 _wd))) '
+        '(if (and (< (abs (- (cadr _lp1) _hy)) 0.25) (< (abs (- (cadr _lp2) _hy)) 0.25) '
+        '(> (max (car _lp1) (car _lp2)) (+ _hxlo 0.2)) (< (min (car _lp1) (car _lp2)) (- _hxhi 0.2))) '
+        '(progn (setq _lxmax (max (car _lp1) (car _lp2)) _lxmin (min (car _lp1) (car _lp2))) '
+        '(entdel _wl) '
+        '(if (< _lxmin (- _hxlo 0.2)) (entmake (list \'(0 . "LINE") (cons 8 _la) (list 10 _lxmin _hy 0.0) (list 11 _hxlo _hy 0.0)))) '
+        '(if (> _lxmax (+ _hxhi 0.2)) (entmake (list \'(0 . "LINE") (cons 8 _la) (list 10 _hxhi _hy 0.0) (list 11 _lxmax _hy 0.0)))))) '
+        '(setq _wi (1+ _wi)))))))))'
+    )
     lisp_body = (
         f"(setq _ent (c:wd_insym2 {_lisp_str(block_name)} '({float(pt[0])} {float(pt[1])} 0.0) {scale} nil)) "
         f"(if (not _ent) (princ \"\\n[ACADE_ERR] wd_insym2 returned nil\\n\") "
-        f"(progn {' '.join(mod_exprs)} (entupd _ent)))"
+        f"(progn {' '.join(mod_exprs)} (entupd _ent) {trim_wire_lisp}))"
     )
     return _run_acade_lisp_checked(lisp_body, ["c:wd_insym2", "c:wd_modattrval"], auto_save=auto_save)
 
@@ -682,7 +877,11 @@ def tool_acade_draw_smart_wires_and_arrows(args: dict[str, Any]) -> dict[str, An
             f'(c:wd_wire_quik \'({float(p1[0])} {float(p1[1])} 0.0) \'({float(p2[0])} {float(p2[1])} 0.0) nil)'
         )
 
-    dot_exprs = [f'(c:wd_insym2 "WDDOT" \'({float(d[0])} {float(d[1])} 0.0) 1.0 nil)' for d in dots]
+    dot_exprs = [
+        f'(if (not (ssget "C" \'({float(d[0]) - 0.35} {float(d[1]) - 0.35}) \'({float(d[0]) + 0.35} {float(d[1]) + 0.35}) \'((0 . "INSERT") (2 . "WDDOT")))) '
+        f'(c:wd_insym2 "WDDOT" \'({float(d[0])} {float(d[1])} 0.0) 1.0 nil))'
+        for d in dots
+    ]
 
     arrow_exprs = []
     for a in arrows:
@@ -703,8 +902,21 @@ def tool_acade_draw_smart_wires_and_arrows(args: dict[str, Any]) -> dict[str, An
     return _run_acade_lisp_checked(lisp_body, ["c:wd_wire_quik", "c:wd_insym2", "c:wd_modattrval"], auto_save=auto_save)
 
 
+V_TO_H_PLC_RUNG_SYMBOL = {
+    "VPB11": "HPB11",
+    "VPB12": "HPB12",
+    "VSW11": "HSW11",
+    "VSW12": "HSW12",
+    "VPX1": "HPX1",
+    "VCR1": "HCR1",
+    "VLT1A": "HLT1A",
+    "VSV1": "HSV1",
+    "VY1": "HSV1",
+}
+
+
 def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
-    """Insert real ACADE PLCIO blocks (HP1W--L header + HP1WA-D channels from iec-60617), wire I/O via c:wd_wire_quik, and insert peripheral blocks."""
+    """Insert real ACADE PLCIO blocks (HP1W--L header + HP1WA-D channels), convert V*->H* horizontal rung peripherals, add ht0001 terminals, and close +24VDC/0VDC common rails."""
     import csv as _csv
 
     csv_path = Path(args["csv_path"]).resolve()
@@ -718,7 +930,7 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
             if blk.startswith("PLC_"):
                 raise ValueError(
                     f"Invalid fake PLC module name '{blk}' in BLOCK column. "
-                    "Use real iec-60617 peripheral symbols (e.g., VCR1, VPB11, VLT1A, VSW12) or leave blank."
+                    "Use real iec-60617 peripheral symbols (e.g., HCR1, HPB11, HLT1A, HSW12) or leave blank."
                 )
             rows.append(row)
 
@@ -727,11 +939,18 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
         key = (row.get("RACK", "0").strip(), row.get("SLOT", "2").strip(), row.get("CODE", "").strip())
         modules.setdefault(key, []).append(row)
 
-    lisp_parts: list[str] = []
+    lisp_parts: list[str] = ['(regapp "VIA_WD_WIRETYPE")']
     for mod_idx, ((rack, slot, code), ch_rows) in enumerate(modules.items()):
         mx = 180.0 + mod_idx * 185.0
         my = 265.0
         mod_tag = f"-A1:S{slot}"
+        first_inst = (ch_rows[0].get("INST") or "=PLC1").strip() if ch_rows else "=PLC1"
+        is_do_mod = any((r.get("ADDRESS") or "").strip().upper().lstrip("%").startswith("Q") for r in ch_rows)
+        common_layer = "CTRL_0VDC_WHBU_0.75" if is_do_mod else "CTRL_24VDC_DBU_0.75"
+        common_sig = "BUS_0VDC_PELV" if is_do_mod else "BUS_24VDC_PELV"
+        common_wno = "0VDC" if is_do_mod else "+24VDC"
+        rail_x = mx - 115.0
+
         # Insert real ACADE PLCIO module header block (HP1W--L: TAG, LINE1, LINE2, MFG, CAT, LOC, INST)
         lisp_parts.append(
             f'(setq _pm (c:wd_insym2 "HP1W--L" \'({mx} {my} 0.0) 1.0 nil)) '
@@ -742,21 +961,20 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
             f'(c:wd_modattrval _pm "MFG" "SIEMENS" nil) '
             f'(c:wd_modattrval _pm "CAT" {_lisp_str(code)} nil) '
             f'(c:wd_modattrval _pm "LOC" "+MAIN_PNL" nil) '
-            f'(c:wd_modattrval _pm "INST" "=PLC1" nil) '
+            f'(c:wd_modattrval _pm "INST" {_lisp_str(first_inst)} nil) '
             f'(entupd _pm)))'
         )
+
+        wired_ys: list[float] = []
         for ch_idx, row in enumerate(ch_rows):
             cy = my - 20.0 - ch_idx * 20.0
-            addr = row.get("ADDRESS", "")
-            tdesc = row.get("TERMDESC", "")
-            wtype = row.get("WIRETYPE", "SIG_PLC_BU_0.5")
-            blk = (row.get("BLOCK") or "").strip()
-            # 1. Draw I/O wire FIRST via c:wd_wire_quik from HP1WA-D X4TERM_ @ (mx - 7.0, cy) going LEFT
-            lisp_parts.append(
-                f'(setvar "CLAYER" {_lisp_str(wtype)}) '
-                f'(c:wd_wire_quik \'({mx - 7.0} {cy} 0.0) \'({mx - 115.0} {cy} 0.0) nil)'
-            )
-            # 2. Insert real PLCIO channel block (HP1WA-D: TAGA_=addr, TERM_, TERMDESC_, DESCA_, DESCB_)
+            addr = (row.get("ADDRESS") or "").strip()
+            tdesc = (row.get("TERMDESC") or "").strip()
+            wtype = (row.get("WIRETYPE") or "SIG_PLC_BU_0.5").strip()
+            raw_blk = (row.get("BLOCK") or "").strip().upper()
+            blk = V_TO_H_PLC_RUNG_SYMBOL.get(raw_blk, raw_blk)
+
+            # Insert real PLCIO channel block (HP1WA-D: X4TERM_ @ mx - 7.0)
             lisp_parts.append(
                 f'(setq _pc (c:wd_insym2 "HP1WA-D" \'({mx} {cy} 0.0) 1.0 nil)) '
                 f'(if _pc (progn '
@@ -767,25 +985,96 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
                 f'(c:wd_modattrval _pc "DESCB_" {_lisp_str(row.get("DESC2", ""))} nil) '
                 f'(entupd _pc)))'
             )
-            # 3. Insert peripheral symbol ON the left-side wire (skip if blank, e.g., Analog %IW64)
+
             if blk:
+                wired_ys.append(cy)
+                term_x = mx - 30.0
+                pe_x = mx - 68.0
+                # Wire segment 1: HP1WA-D X4TERM_ (mx-7.0) -> ht0001 X1TERM01 (term_x+1.25)
                 lisp_parts.append(
-                    f'(setq _pe (c:wd_insym2 {_lisp_str(blk)} \'({mx - 60.0} {cy} 0.0) 1.0 nil)) '
+                    f'(setvar "CLAYER" {_lisp_str(wtype)}) '
+                    f'(c:wd_wire_quik \'({mx - 7.0} {cy} 0.0) \'({term_x + 1.25} {cy} 0.0) nil)'
+                )
+                # Insert intermediate terminal ht0001 (-X2 / -X3)
+                t_strip = "-X3" if is_do_mod else "-X2"
+                t_num = f"S{slot}.{ch_idx + 1}"
+                lisp_parts.append(
+                    f'(setq _tm (c:wd_insym2 "ht0001" \'({term_x} {cy} 0.0) 1.0 nil)) '
+                    f'(if _tm (progn '
+                    f'(c:wd_modattrval _tm "TAGSTRIP" {_lisp_str(t_strip)} nil) '
+                    f'(c:wd_modattrval _tm "TERM01" {_lisp_str(t_num)} nil) '
+                    f'(c:wd_modattrval _tm "MFG" "PHOENIX CONTACT" nil) '
+                    f'(c:wd_modattrval _tm "CAT" "3004100" nil) '
+                    f'(c:wd_modattrval _tm "LOC" "+MAIN_PNL" nil) '
+                    f'(c:wd_modattrval _tm "INST" {_lisp_str(first_inst)} nil) '
+                    f'(entupd _tm)))'
+                )
+                # Wire segment 2: ht0001 X4TERM01 (term_x-1.25) -> H* peripheral X1TERM02 (pe_x+7.5)
+                lisp_parts.append(
+                    f'(setvar "CLAYER" {_lisp_str(wtype)}) '
+                    f'(c:wd_wire_quik \'({term_x - 1.25} {cy} 0.0) \'({pe_x + 7.5} {cy} 0.0) nil)'
+                )
+                # Insert horizontal peripheral symbol (X4TERM01 @ -7.5, X1TERM02 @ +7.5) with default MFG/CAT if omitted
+                def_mfg = (row.get("MFG") or "SIEMENS").strip().upper()
+                def_cat = (row.get("CAT") or "").strip()
+                if not def_cat:
+                    if blk == "HCR1":
+                        def_cat = "3RT2026-1BB40"
+                    elif blk == "HLT1A":
+                        def_cat = "3SU1152-6AA20-1AA0"
+                    elif blk in ("HSW12", "HSW11", "HPB11", "HPB12"):
+                        def_cat = "3SU1150-1HB20-1CG0"
+                lisp_parts.append(
+                    f'(setq _pe (c:wd_insym2 {_lisp_str(blk)} \'({pe_x} {cy} 0.0) 1.0 nil)) '
                     f'(if _pe (progn '
                     f'(c:wd_modattrval _pe "TAG1" {_lisp_str(row.get("TAG", ""))} nil) '
+                    f'(c:wd_modattrval _pe "MFG" {_lisp_str(def_mfg)} nil) '
+                    f'(c:wd_modattrval _pe "CAT" {_lisp_str(def_cat)} nil) '
                     f'(c:wd_modattrval _pe "DESC1" {_lisp_str(row.get("DESC1", ""))} nil) '
                     f'(c:wd_modattrval _pe "DESC2" {_lisp_str(row.get("DESC2", ""))} nil) '
                     f'(c:wd_modattrval _pe "LOC" {_lisp_str(row.get("LOC", "+FIELD"))} nil) '
-                    f'(c:wd_modattrval _pe "INST" {_lisp_str(row.get("INST", "=PLC1"))} nil) '
+                    f'(c:wd_modattrval _pe "INST" {_lisp_str(row.get("INST", first_inst))} nil) '
                     f'(entupd _pe)))'
                 )
+                # Wire segment 3 (Closed-Circuit Return / Supply): H* X4TERM01 (pe_x-7.5) -> Common Rail (rail_x)
+                lisp_parts.append(
+                    f'(setvar "CLAYER" {_lisp_str(common_layer)}) '
+                    f'(c:wd_wire_quik \'({pe_x - 7.5} {cy} 0.0) \'({rail_x} {cy} 0.0) nil)'
+                )
+            else:
+                # Spare / Analog stub wire going left from HP1WA-D X4TERM_
+                lisp_parts.append(
+                    f'(setvar "CLAYER" {_lisp_str(wtype)}) '
+                    f'(c:wd_wire_quik \'({mx - 7.0} {cy} 0.0) \'({mx - 45.0} {cy} 0.0) nil)'
+                )
 
-    lisp_body = " ".join(lisp_parts) if lisp_parts else '(princ "No PLC rows")'
+        # Draw vertical common rail on left (0VDC return for DO coils/lamps; +24VDC supply for DI switches/sensors) + Signal Arrow
+        if wired_ys:
+            top_y = wired_ys[0] + 12.0
+            pts_y = [top_y, *wired_ys]
+            for ya, yb in zip(pts_y[:-1], pts_y[1:]):
+                lisp_parts.append(
+                    f'(setvar "CLAYER" {_lisp_str(common_layer)}) '
+                    f'(c:wd_wire_quik \'({rail_x} {ya} 0.0) \'({rail_x} {yb} 0.0) nil)'
+                )
+            for ty in wired_ys[:-1]:
+                lisp_parts.append(
+                    f'(if (not (ssget "C" \'({rail_x - 0.35} {ty - 0.35}) \'({rail_x + 0.35} {ty + 0.35}) \'((0 . "INSERT") (2 . "WDDOT")))) '
+                    f'(c:wd_insym2 "WDDOT" \'({rail_x} {ty} 0.0) 1.0 nil))'
+                )
+            arr_blk = "HA1D3" if is_do_mod else "HA1S1"
+            lisp_parts.append(
+                f'(setq _ca (c:wd_insym2 {_lisp_str(arr_blk)} \'({rail_x} {top_y} 0.0) 1.0 nil)) '
+                f'(if _ca (progn (c:wd_modattrval _ca "SIGCODE" {_lisp_str(common_sig)} nil) '
+                f'(c:wd_modattrval _ca "WIRENO" {_lisp_str(common_wno)} nil) (entupd _ca)))'
+            )
+
+    lisp_body = " ".join(lisp_parts) if len(lisp_parts) > 1 else '(princ "No PLC rows")'
     return _run_acade_lisp_checked(
         lisp_body,
         ["c:wd_insym2", "c:wd_modattrval", "c:wd_wire_quik"],
         auto_save=bool(args.get("auto_save", True)),
-        timeout_sec=45.0,
+        timeout_sec=55.0,
     )
 
 
@@ -840,29 +1129,53 @@ $conn.Close()
         }
         ins_exprs = [
             '(regapp "VIA_WD_FP")',
-            '(setq _ms (vla-get-ModelSpace (vla-get-ActiveDocument (vlax-get-acad-object))))',
+            '(setq _doc (vla-get-ActiveDocument (vlax-get-acad-object)))',
+            '(if (not (tblobjname "LAYER" "PNL_FOOTPRINT")) (entmake \'((0 . "LAYER") (100 . "AcDbSymbolTableRecord") (100 . "AcDbLayerTableRecord") (2 . "PNL_FOOTPRINT") (70 . 0) (62 . 4) (6 . "CONTINUOUS"))))',
+            '(if (not (tblobjname "LAYER" "PNL_ENCLOSURE")) (entmake \'((0 . "LAYER") (100 . "AcDbSymbolTableRecord") (100 . "AcDbLayerTableRecord") (2 . "PNL_ENCLOSURE") (70 . 0) (62 . 7) (6 . "CONTINUOUS"))))',
+            '(if (not (tblobjname "LAYER" "PNL_PLATE")) (entmake \'((0 . "LAYER") (100 . "AcDbSymbolTableRecord") (100 . "AcDbLayerTableRecord") (2 . "PNL_PLATE") (70 . 0) (62 . 8) (6 . "CONTINUOUS"))))',
+            '(setq _ms (vla-get-ModelSpace _doc))',
             # Draw 800x1200 door & 740x1140 mounting plate outlines in 1:1 mm Model Space
             '(entmake \'((0 . "LWPOLYLINE") (100 . "AcDbEntity") (8 . "PNL_ENCLOSURE") (100 . "AcDbPolyline") (90 . 4) (70 . 1) (10 0.0 0.0) (10 800.0 0.0) (10 800.0 1200.0) (10 0.0 1200.0)))',
             '(entmake \'((0 . "LWPOLYLINE") (100 . "AcDbEntity") (8 . "PNL_ENCLOSURE") (100 . "AcDbPolyline") (90 . 4) (70 . 1) (10 1090.0 0.0) (10 1890.0 0.0) (10 1890.0 1200.0) (10 1090.0 1200.0)))',
             '(entmake \'((0 . "LWPOLYLINE") (100 . "AcDbEntity") (8 . "PNL_PLATE") (100 . "AcDbPolyline") (90 . 4) (70 . 1) (10 1120.0 30.0) (10 1860.0 30.0) (10 1860.0 1170.0) (10 1120.0 1170.0)))',
         ]
+        placed_tags: list[str] = []
         for idx, comp in enumerate(res["components"]):
-            mfg = (comp.get("mfg") or "SIEMENS").upper()
-            cat_raw = (comp.get("cat") or "").upper()
-            cat_clean = cat_raw.replace("-", "_")
-            dwg_path = panel_root / mfg / f"PNL_{mfg.replace(' ', '_')}_{cat_clean}.dwg"
+            mfg = _normalize_mfg(comp.get("mfg") or "SIEMENS")
+            cat_raw = (comp.get("cat") or "").strip().upper()
+            if not cat_raw:
+                raise ValueError(f"Component '{comp.get('tag')}' has empty CAT in [COMP]; assign catalog before syncing footprints!")
+            cat_clean = cat_raw.replace("-", "_").replace("/", "_")
+            blknam = f"PNL_{mfg.replace(' ', '_')}_{cat_clean}"
+            dwg_path = panel_root / mfg / f"{blknam}.dwg"
             if not dwg_path.exists():
-                continue
+                if str(SKILL_ROOT / "scripts") not in sys.path:
+                    sys.path.insert(0, str(SKILL_ROOT / "scripts"))
+                from seed_acade_databases import _build_panel_footprint_dwg_if_missing
+
+                loc_val = (comp.get("loc") or "+MAIN_PNL").upper()
+                fb_row = {
+                    "CAT": cat_raw,
+                    "W_MM": "30.0" if loc_val == "+DOOR" else "45.0",
+                    "H_MM": "40.0" if loc_val == "+DOOR" else "95.0",
+                    "MOUNT_TYPE": "DOOR" if loc_val == "+DOOR" else "DIN_TS35",
+                }
+                dwg_path = _build_panel_footprint_dwg_if_missing(panel_root.parent, mfg, blknam, fb_row)
             tag = comp.get("tag", "")
             loc = comp.get("loc", "+MAIN_PNL")
             base_tag = tag.split(":")[0]
-            if base_tag in known_coords:
+            if base_tag in known_coords and ":" not in tag:
                 x, y = known_coords[base_tag]
+            elif base_tag == "-A1" and ":S" in tag:
+                slot_s = tag.split(":S")[-1]
+                s_num = int(slot_s) if slot_s.isdigit() else (idx + 1)
+                x, y = 1318.0 + max(0, s_num - 1) * 37.0, 871.0
             else:
                 x = (120.0 if loc == "+DOOR" else 1200.0) + (idx % 4) * 140.0
                 y = 900.0 - (idx // 4) * 220.0
             ins_exprs.append(
                 f'(setq _vfp (vla-InsertBlock _ms (vlax-3d-point {x} {y} 0.0) {_lisp_str(str(dwg_path))} 1.0 1.0 1.0 0.0)) '
+                f'(vla-put-Layer _vfp "PNL_FOOTPRINT") '
                 f'(setq _fp (vlax-vla-object->ename _vfp)) '
                 f'(c:wd_modattrval _fp "P_TAG1" {_lisp_str(tag)} nil) '
                 f'(c:wd_modattrval _fp "MFG" {_lisp_str(mfg)} nil) '
@@ -872,8 +1185,14 @@ $conn.Close()
                 f'(entmod (append _fped (list (list -3 (list "VIA_WD_FP" (cons 1000 {_lisp_str(tag)}) (cons 1000 {_lisp_str(mfg)}) (cons 1000 {_lisp_str(cat_raw)})))))) '
                 f'(entupd _fp)'
             )
-        if len(ins_exprs) > 5:
-            _run_acade_lisp_checked(" ".join(ins_exprs), ["c:wd_modattrval"], auto_save=True, timeout_sec=45.0)
+            placed_tags.append(tag)
+        # Ensure Paper Space ISO_A3 layout is active (TILEMODE=0) if present on Panel Layout sheets
+        ins_exprs.append(
+            '(if (member "ISO_A3" (layoutlist)) (progn (setvar "TILEMODE" 0) (setvar "CTAB" "ISO_A3")))'
+        )
+        if placed_tags:
+            _run_acade_lisp_checked(" ".join(ins_exprs), ["c:wd_modattrval"], auto_save=True, timeout_sec=50.0)
+        res["placed_footprints"] = len(placed_tags)
     return res
 
 
@@ -933,18 +1252,45 @@ def tool_acade_run_reports_and_retag(args: dict[str, Any]) -> dict[str, Any]:
         ["c:wd_insym2", "c:wd_modattrval", "c:wd_retag_update_noprompts", "c:wd_tb_process_one"],
         auto_save=bool(args.get("auto_save", True)),
     )
-    for sp in sheet_paths:
-        tool_autocad_open_or_new({"path": sp})
+
+    # Locate .wdp metadata if available so WD_M.SHEET and TITLE_BLOCK_A3_BILINGUAL are deterministically stamped across all sheets
+    wdp_descs: dict[str, str] = {}
+    wdp_sheets: list[str] = []
+    search_dirs: list[Path] = []
+    if args.get("wdp_path"):
+        wp = Path(args["wdp_path"]).resolve()
+        wdp_descs, wdp_sheets = _parse_wdp_metadata(wp)
+    elif sheet_paths:
+        p0 = Path(sheet_paths[0]).resolve()
+        search_dirs = [p0.parent, p0.parent.parent]
+        for sd in search_dirs:
+            wdps = sorted(sd.glob("*.wdp"))
+            if wdps:
+                wdp_descs, wdp_sheets = _parse_wdp_metadata(wdps[0])
+                break
+
+    total_sh = max(len(wdp_sheets), len(sheet_paths), 1)
+    for idx0, sp in enumerate(sheet_paths):
+        sp_path = Path(sp).resolve()
+        sh_idx = (wdp_sheets.index(sp_path.name) + 1) if sp_path.name in wdp_sheets else (idx0 + 1)
+        sh_str = f"{sh_idx:02d}"
+        fl = sp_path.name.lower()
+        sub = "PANEL" if ("panel" in fl or "-lay-" in fl or "_lay_" in fl) else "SCH"
+        tb_map = _build_titleblock_attr_map(wdp_descs, sp_path, sh_idx, total_sh, sub=sub)
+        sync_tb_lisp = _lisp_sync_wdm_and_titleblock(sh_str, tb_map)
+        tool_autocad_open_or_new({"path": str(sp_path)})
         _run_acade_lisp_checked(
-            f'{wnum_lisp} (c:wd_tb_process_one 1 (list (list 1 1 1 1 1 1 1 1 0 0 1 1 1)))',
+            f'{sync_tb_lisp} {wnum_lisp} (c:wd_tb_process_one 1 (list (list 1 1 1 1 1 1 1 1 0 0 1 1 1)))',
             ["c:wd_insym2", "c:wd_modattrval", "c:wd_tb_process_one"],
             auto_save=True,
         )
+    if sheet_paths:
+        _run_acade_lisp_checked('(command "_AEREBUILDDB")', ["c:wd_insym2"], auto_save=True)
     return res
 
 
 def tool_acade_place_db_reports_on_drawing(args: dict[str, Any]) -> dict[str, Any]:
-    """Query live Project Scratch .mdb (BOM rollup by MFG+CAT+ASSYCODE, WIRE_FROM_TO+WIRETYPE, PLCIO, TERMS) and place dynamic AcDbTable."""
+    """Query live Project Scratch .mdb (BOM rollup by MFG+CAT+ASSYCODE, WIRE_FROM_TO+fallback, PLCIO, TERMS) and place dynamic AcDbTable (auto-detects PaperSpace on TILEMODE=0)."""
     mdb_path = Path(args["mdb_path"]).resolve()
     report_type = args.get("report_type", "BOM").upper()
     insert_pt = args.get("insert") or [232.0, 280.0, 0.0]
@@ -983,19 +1329,52 @@ def tool_acade_place_db_reports_on_drawing(args: dict[str, Any]) -> dict[str, An
     ps = f"""
 $conn = New-Object System.Data.Odbc.OdbcConnection("Driver={{Microsoft Access Driver (*.mdb, *.accdb)}};Dbq={mdb_str};")
 $conn.Open()
-$cmd = $conn.CreateCommand()
-$cmd.CommandText = "{sql}"
-$r = $cmd.ExecuteReader()
+$tables = @($conn.GetSchema("Tables") | Where-Object {{ $_.TABLE_TYPE -eq "TABLE" }} | Select-Object -ExpandProperty TABLE_NAME)
 $rows = @()
-while ($r.Read()) {{
-    $row = @()
-    for ($i = 0; $i -lt $r.FieldCount; $i++) {{
-        $v = $r.GetValue($i)
-        $row += if ($v -is [DBNull]) {{ "" }} else {{ [string]$v }}
+try {{
+    $cmd = $conn.CreateCommand()
+    $cmd.CommandText = "{sql}"
+    $r = $cmd.ExecuteReader()
+    while ($r.Read()) {{
+        $row = @()
+        for ($i = 0; $i -lt $r.FieldCount; $i++) {{
+            $v = $r.GetValue($i)
+            $row += if ($v -is [DBNull]) {{ "" }} else {{ [string]$v }}
+        }}
+        $rows += ,$row
     }}
-    $rows += ,$row
+    $r.Close()
+}} catch {{}}
+if (($rows.Count -eq 0) -and ("{report_type}" -eq "WIRE_FROM_TO")) {{
+    if ($tables -contains "TERMS") {{
+        $cmd2 = $conn.CreateCommand()
+        $cmd2.CommandText = "SELECT WIRENO, TAGSTRIP, TERM, LOC, INST FROM [TERMS] WHERE WIRENO IS NOT NULL AND WIRENO<>'' ORDER BY WIRENO, TAGSTRIP, TERM"
+        $r2 = $cmd2.ExecuteReader()
+        while ($r2.Read()) {{
+            $wno = [string]$r2["WIRENO"]
+            $ts = [string]$r2["TAGSTRIP"]
+            $tm = [string]$r2["TERM"]
+            $lc = [string]$r2["LOC"]
+            $in = [string]$r2["INST"]
+            $rows += ,@($wno, $ts, $tm, $lc, $in, "BU", "0.75", "CTRL_24VDC_DBU_0.75")
+        }}
+        $r2.Close()
+    }}
+    if (($rows.Count -eq 0) -and ($tables -contains "PLCIO")) {{
+        $cmd3 = $conn.CreateCommand()
+        $cmd3.CommandText = "SELECT ADDR, TAGNAME, TERM, TERMDESC, DESCA FROM [PLCIO] WHERE ADDR IS NOT NULL AND ADDR<>'' ORDER BY TAGNAME, ADDR"
+        $r3 = $cmd3.ExecuteReader()
+        while ($r3.Read()) {{
+            $ad = [string]$r3["ADDR"]
+            $tg = [string]$r3["TAGNAME"]
+            $tm = [string]$r3["TERM"]
+            $td = [string]$r3["TERMDESC"]
+            $ds = [string]$r3["DESCA"]
+            $rows += ,@($ad, $tg, $tm, $td, $ds, "BU", "0.5", "SIG_PLC_BU_0.5")
+        }}
+        $r3.Close()
+    }}
 }}
-$r.Close()
 $conn.Close()
 @{{ rows = $rows }} | ConvertTo-Json -Depth 4 -Compress
 """
@@ -1016,8 +1395,18 @@ $conn.Close()
     if len(table_data) == 1:
         return {"report_type": report_type, "rows": 0, "placed": False}
 
+    # Auto-detect PaperSpace when active drawing is a Layout sheet (TILEMODE == 0) unless explicitly overridden
+    target_space = args.get("space")
+    if not target_space:
+        try:
+            st = tool_autocad_status({})
+            ad = st.get("activeDocument") or {}
+            target_space = "PaperSpace" if int(ad.get("tilemode", 1)) == 0 else "ModelSpace"
+        except Exception:
+            target_space = "ModelSpace"
+
     draw_res = tool_autocad_draw_entities({
-        "space": args.get("space", "ModelSpace"),
+        "space": target_space,
         "zoom_extents": False,
         "auto_save": bool(args.get("auto_save", True)),
         "entities": [{
@@ -1027,11 +1416,11 @@ $conn.Close()
             "rows": len(table_data),
             "cols": len(headers),
             "row_height": 6.0,
-            "col_width": 32.0,
+            "col_width": 26.0,
             "data": table_data,
         }],
     })
-    return {"report_type": report_type, "rows": len(db_rows), "placed": True, "draw": draw_res}
+    return {"report_type": report_type, "rows": len(db_rows), "placed": True, "space": target_space, "draw": draw_res}
 
 
 def tool_acade_insert_cable_and_jumper(args: dict[str, Any]) -> dict[str, Any]:
@@ -1089,15 +1478,18 @@ def tool_acade_insert_cable_and_jumper(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def tool_acade_electrical_audit(args: dict[str, Any]) -> dict[str, Any]:
-    """Run Fail-Closed Database Gatekeeper audit on Project Scratch .mdb (no modal DCL dialogs)."""
+    """Run Fail-Closed Database + DWG Gatekeeper v2.0 audit on Project Scratch .mdb and optional project_dir."""
     mdb_path = Path(args["mdb_path"]).resolve()
+    cmd = [sys.executable, str(AUDIT_SCRIPT), "--mdb", str(mdb_path)]
+    if args.get("project_dir"):
+        cmd.extend(["--project-dir", str(Path(args["project_dir"]).resolve())])
     proc = subprocess.run(
-        [sys.executable, str(AUDIT_SCRIPT), "--mdb", str(mdb_path)],
+        cmd,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=45,
+        timeout=90,
     )
     if proc.returncode not in (0, 2):
         raise RuntimeError((proc.stderr or proc.stdout or "Audit script failed").strip())
@@ -1274,10 +1666,12 @@ TOOLS = [
     },
     {
         "name": "acade_run_reports_and_retag",
-        "description": "Run project-wide AERETAG, AEWIRENO, AEUPDATETITLEBLOCK, and AEREPORTGROUP (.rgf).",
+        "description": "Run project-wide equipotential wire numbering (%S%N), AEREBUILDDB, AERETAG, and deterministic Title Block + WD_M.SHEET sync across all sheets.",
         "inputSchema": {
             "type": "object",
             "properties": {
+                "sheet_paths": {"type": "array", "items": {"type": "string"}},
+                "wdp_path": {"type": "string"},
                 "rgf_path": {"type": "string"},
                 "auto_save": {"type": "boolean", "default": True},
             },
@@ -1285,14 +1679,14 @@ TOOLS = [
     },
     {
         "name": "acade_place_db_reports_on_drawing",
-        "description": "Query live Project Scratch .mdb (COMP, WFRM2ALL, PLCIO, TERMS) and place dynamic AcDbTable reports (BOM, WIRE_FROM_TO, PLCIO, TERMINAL_PLAN) with zero modal DCL dialogs.",
+        "description": "Query live Project Scratch .mdb (COMP, WFRM2ALL, PLCIO, TERMS) and place dynamic AcDbTable reports (BOM, WIRE_FROM_TO, PLCIO, TERMINAL_PLAN) with auto PaperSpace detection when TILEMODE=0.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "mdb_path": {"type": "string"},
                 "report_type": {"type": "string", "enum": ["BOM", "WIRE_FROM_TO", "PLCIO", "TERMINAL_PLAN", "CABLE_SUMMARY"], "default": "BOM"},
                 "insert": {"type": "array", "items": {"type": "number"}},
-                "space": {"type": "string", "enum": ["ModelSpace", "PaperSpace"], "default": "ModelSpace"},
+                "space": {"type": "string", "enum": ["ModelSpace", "PaperSpace"]},
                 "auto_save": {"type": "boolean", "default": True},
             },
             "required": ["mdb_path"],
@@ -1312,11 +1706,12 @@ TOOLS = [
     },
     {
         "name": "acade_electrical_audit",
-        "description": "Gatekeeper audit on ACADE Project Scratch .mdb (missing catalog, duplicate tags, orphaned child contacts, bogus wires, schematic vs panel discrepancy).",
+        "description": "Gatekeeper v2.0 audit on ACADE Project Scratch .mdb and .dwg sheets (missing catalog, duplicate tags, orphaned children, family block misuse, unupdated titleblocks, wires piercing symbols, open-circuit loads, panel layout violations).",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "mdb_path": {"type": "string"},
+                "project_dir": {"type": "string", "description": "Optional path to project folder or 01_Drawings folder for deep DWG geometry & Title Block audit."},
                 "run_dwg_audit": {"type": "boolean", "default": False},
             },
             "required": ["mdb_path"],

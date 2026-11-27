@@ -64,7 +64,21 @@ FAMILY_TO_TABLE = {
     "S": "PB",
     "H": "LT",
     "X": "TRMS",
+    "RE": "RE",
+    "R": "RE",
 }
+
+
+def detect_iec_libs_dir() -> Path:
+    """Auto-detect ACADE Libs\\iec-60617 folder."""
+    candidates = [
+        Path(r"F:\Projects\CAD\Libraries\AutoCAD-Electrical\2027\Libs\iec-60617"),
+        Path(r"C:\Users\Public\Documents\Autodesk\Acade 2027\Libs\iec-60617"),
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return candidates[0]
 
 
 def _run_ps_odbc(ps_script: str) -> str:
@@ -313,10 +327,116 @@ $conn.Close()
     return {"found": res.get("found", []), "missing": res.get("missing", [])}
 
 
+def build_custom_iec_schematic_symbols(iec_dir: Path) -> list[str]:
+    """Compile dedicated ACADE schematic symbols (VG1_PSU_24V, VU1_VFD_3P, VA4_NET_BOX) into Libs\\iec-60617\\."""
+    import ezdxf
+
+    if not iec_dir.exists():
+        return []
+
+    specs = [
+        {
+            "name": "VG1_PSU_24V",
+            "w": 42.0,
+            "h": 46.0,
+            "family": "G",
+            "tag_def": "-G1",
+            "desc1": "POWER SUPPLY 24VDC",
+            "mfg": "SIEMENS",
+            "cat": "6EP1334-2BA20",
+            "top": [("01", "L1", 8.0), ("02", "N", 21.0), ("03", "PE", 34.0)],
+            "bot": [("04", "+24V", 12.0), ("05", "0V", 30.0)],
+            "right": [],
+        },
+        {
+            "name": "VU1_VFD_3P",
+            "w": 52.0,
+            "h": 64.0,
+            "family": "U",
+            "tag_def": "-U1",
+            "desc1": "VFD INVERTER 3AC",
+            "mfg": "SIEMENS",
+            "cat": "6SL3210-1KE18-8UF2",
+            "top": [("01", "L1", 11.0), ("02", "L2", 26.0), ("03", "L3", 41.0)],
+            "bot": [("04", "U", 8.0), ("05", "V", 20.0), ("06", "W", 32.0), ("07", "PE", 44.0)],
+            "right": [("08", "DI0", 46.0), ("09", "STO+", 32.0), ("10", "STO-", 18.0)],
+        },
+        {
+            "name": "VA4_NET_BOX",
+            "w": 44.0,
+            "h": 46.0,
+            "family": "A",
+            "tag_def": "-A3",
+            "desc1": "PROFINET / HMI MODULE",
+            "mfg": "SIEMENS",
+            "cat": "6GK5008-0BA10-1AB2",
+            "top": [("01", "+24V", 14.0), ("02", "0V", 30.0)],
+            "bot": [("03", "PE", 22.0)],
+            "right": [("04", "PN_P1", 30.0), ("05", "PN_P2", 16.0)],
+        },
+    ]
+
+    built: list[str] = []
+    for sp in specs:
+        out_dwg = iec_dir / f"{sp['name']}.dwg"
+        tmp_dxf = iec_dir / f"{sp['name']}_tmp.dxf"
+        doc = ezdxf.new("R2018", setup=True)
+        doc.header["$INSUNITS"] = 4
+        doc.header["$MEASUREMENT"] = 1
+        if "VN_ARIAL" not in doc.styles:
+            doc.styles.add("VN_ARIAL", font="arial.ttf", dxfattribs={"width": 0.82})
+        for lname, col in (("SYMS", 7), ("TAGS", 3), ("DESC", 7), ("TERMS", 7)):
+            if lname not in doc.layers:
+                doc.layers.add(lname, color=col)
+        msp = doc.modelspace()
+        w, h = sp["w"], sp["h"]
+        msp.add_lwpolyline([(0, 0), (w, 0), (w, h), (0, h), (0, 0)], dxfattribs={"layer": "SYMS"})
+        msp.add_lwpolyline([(2, 2), (w - 2, 2), (w - 2, h - 2), (2, h - 2), (2, 2)], dxfattribs={"layer": "SYMS"})
+
+        core = [
+            ("TAG1", (4.0, h + 3.0), sp["tag_def"], 2.8, 0),
+            ("DESC1", (4.0, h / 2.0 + 4.0), sp["desc1"], 1.9, 0),
+            ("DESC2", (4.0, h / 2.0), "", 1.8, 0),
+            ("DESC3", (4.0, h / 2.0 - 4.0), "", 1.8, 0),
+            ("MFG", (4.0, 4.0), sp["mfg"], 1.6, 1),
+            ("CAT", (4.0, 7.0), sp["cat"], 1.6, 1),
+            ("ASSYCODE", (4.0, 10.0), "", 1.5, 1),
+            ("LOC", (w - 18.0, h + 3.0), "+MAIN_PNL", 1.8, 0),
+            ("INST", (w - 18.0, h + 6.5), "=PLC1", 1.8, 0),
+            ("FAMILY", (4.0, 13.0), sp["family"], 1.5, 1),
+            ("XREF", (4.0, -5.0), "", 1.7, 0),
+            ("RATING1", (4.0, h / 2.0 - 8.0), "", 1.6, 0),
+        ]
+        for tag, pos, val, ht, flg in core:
+            msp.add_attdef(tag, insert=pos, text=val, height=ht, dxfattribs={"layer": "TAGS", "style": "VN_ARIAL", "flags": flg})
+
+        for idx, tlbl, x in sp["top"]:
+            msp.add_line((x, h), (x, h + 5.0), dxfattribs={"layer": "SYMS"})
+            msp.add_attdef(f"X2TERM{idx}", insert=(x, h + 5.0), text="", height=1.0, dxfattribs={"layer": "SYMS", "flags": 1})
+            msp.add_attdef(f"TERM{idx}", insert=(x - 2.5, h - 5.0), text=tlbl, height=1.7, dxfattribs={"layer": "TERMS", "style": "VN_ARIAL"})
+
+        for idx, tlbl, x in sp["bot"]:
+            msp.add_line((x, 0.0), (x, -5.0), dxfattribs={"layer": "SYMS"})
+            msp.add_attdef(f"X8TERM{idx}", insert=(x, -5.0), text="", height=1.0, dxfattribs={"layer": "SYMS", "flags": 1})
+            msp.add_attdef(f"TERM{idx}", insert=(x - 2.5, 3.2), text=tlbl, height=1.7, dxfattribs={"layer": "TERMS", "style": "VN_ARIAL"})
+
+        for idx, tlbl, y in sp["right"]:
+            msp.add_line((w, y), (w + 5.0, y), dxfattribs={"layer": "SYMS"})
+            msp.add_attdef(f"X1TERM{idx}", insert=(w + 5.0, y), text="", height=1.0, dxfattribs={"layer": "SYMS", "flags": 1})
+            msp.add_attdef(f"TERM{idx}", insert=(w - 13.0, y - 1.0), text=tlbl, height=1.7, dxfattribs={"layer": "TERMS", "style": "VN_ARIAL"})
+
+        doc.saveas(tmp_dxf)
+        convert_dxf_to_dwg(tmp_dxf, out_dwg)
+        tmp_dxf.unlink(missing_ok=True)
+        built.append(out_dwg.name)
+    return built
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Seed ACADE 2027 Access Databases (.mdb) from skill templates")
     parser.add_argument("--aedata", type=Path, default=detect_aedata_dir(), help="Path to AeData\\en-US folder")
     parser.add_argument("--panel-libs", type=Path, default=detect_panel_libs_dir(), help="Path to Libs\\panel folder")
+    parser.add_argument("--iec-libs", type=Path, default=detect_iec_libs_dir(), help="Path to Libs\\iec-60617 folder")
     args = parser.parse_args()
 
     cat_mdb = args.aedata / "Catalogs" / "default_cat.mdb"
@@ -325,9 +445,10 @@ def main() -> None:
 
     cat_res = seed_catalog_mdb(cat_mdb, SKILL_DIR / "templates" / "catalog_master_seed.csv")
     fp_res = seed_footprint_mdb(fp_mdb, SKILL_DIR / "templates" / "verified_footprints_catalog.csv", args.panel_libs)
+    sym_res = build_custom_iec_schematic_symbols(args.iec_libs)
     plc_res = verify_plc_codes(plc_mdb, SKILL_DIR / "templates" / "plc_io_import_template.csv")
 
-    print(json.dumps({"catalog": cat_res, "footprint": fp_res, "plc": plc_res}, indent=2))
+    print(json.dumps({"catalog": cat_res, "footprint": fp_res, "custom_symbols": sym_res, "plc": plc_res}, indent=2))
     if plc_res["missing"]:
         raise SystemExit(f"Missing PLC codes in ace_plc.mdb: {plc_res['missing']}")
 
