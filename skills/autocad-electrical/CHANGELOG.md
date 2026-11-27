@@ -1,10 +1,12 @@
 # Changelog — `autocad-electrical`
 
+## v1.7.0 — 2026-11-27
+- **100% Paper Space Layout (`ISO_A3`, `$TILEMODE=0`) across ALL drawings (`01..09`)**: Removed all borders and Title Blocks from `Model Space` in `TEMPLATE_IEC_A3.dwt` and `TEMPLATE_PANEL_LAYOUT_A3.dwt` (`MODEL_TB = 0`, `PAPER_TB = 1`, Display-Locked `1:1` and `1:10` `VIEWPORT`s, ISO 5456-2 Third-Angle Projection symbol, and all invisible system attributes strictly inside `[240..340, 8.0]`).
+- **Multi-Pole Switching (`poles=2|3|4`) & Verified Industrial Circuit Macros (`acade_insert_verified_circuit`)**: Added linked multi-pole insertion (`VCB11Q13 + VCB21Q13`, `VFU1 + VFU2`, `VCR21`, `VDS11 + VDS21` with mechanical `LINK` line cutting all phase wires), Safe Zone guard (`[25..405, 12..276]`), 2-column A3 PLC sheet overflow guard (`my=256`), and pre-verified circuit macros (`BUS_3PH_N_PE`, `DOL_3P`, `VFD_3P`, `PSU_24VDC_PELV`).
+- **Gatekeeper v3.0 (`Electrical Netlist DRC` + `Layout Gatekeeper`)**: Added graph-based netlist verification in `acade_electrical_audit.py` to block `modelspace_titleblock_violations`, `short_circuit_nets` (`PE` shorted to live phase or `AC_N` shorted to `DC_0V`), `unprotected_3phase_poles` (single-pole CB leaving `L2/L3` live), and `text_or_attr_overflows`.
+
 ## v1.6.0 — 2026-11-27
-- Replaced Child contact `VMS2NA13F` with Parent MPCB/CB symbols (`VCB11Q13` / `VMS1NA21F`) and enforced hard Parent/Child (`TAG1` vs `TAG2`) and IEC 60617 family guards (`U`/`G`/`A` forbidden on `VCR1`/`HCR1`) in `autocad_mcp_server.py`.
-- Compiled 3 dedicated schematic `.dwg` blocks (`VG1_PSU_24V`, `VU1_VFD_3P`, `VA4_NET_BOX`) into `Libs\iec-60617\` and expanded `verified_footprints_catalog.csv` (24 footprints) & `catalog_master_seed.csv` (23 catalogs) for S7-1500 I/O, SCALANCE switch, EOL resistor, and pilot devices.
-- Added `templates/TEMPLATE_PANEL_LAYOUT_A3.dwt` (`$TILEMODE=0`, Paper Space `ISO_A3` 1:10 `VIEWPORT`) and embedded `WD_TB` inside `TITLE_BLOCK_A3_BILINGUAL` across both `.dwt` templates, with deterministic `WD_M.SHEET` and Title Block attribute stamping across all sheets.
-- Upgraded `acade_insert_schematic_symbol` (auto wire-break across opposite pins), `acade_draw_smart_wires_and_arrows` (`WDDOT` deduplication), `acade_build_plc_from_csv` (`V*->H*` horizontal rung mapping + intermediate `ht0001` + closed-circuit `+24VDC`/`0VDC` rails), `acade_sync_panel_footprints` (`PNL_FOOTPRINT` layer + fallback footprint generator), and `acade_electrical_audit.py` (Gatekeeper v2.0 headless `.dwg` + `.mdb` inspection).
+- Added Parent/Child & IEC 60617 family guards, 3 custom `.dwg` schematic blocks (`VG1_PSU_24V`, `VU1_VFD_3P`, `VA4_NET_BOX`), 24 verified footprints, auto wire-splitting, `WDDOT` deduplication, and horizontal closed-circuit PLC I/O rungs.
 
 ## v1.5.2 — 2026-11-26
 - Native ACADE 2027 COM/AutoLISP engine (`c:wd_*`), Access `.mdb` ODBC seeding, and Gatekeeper v1.0.

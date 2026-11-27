@@ -153,11 +153,15 @@ def _run_acade_lisp_checked(lisp_body: str, req_fns: list[str], auto_save: bool 
     done_path.unlink(missing_ok=True)
 
     guard = _lisp_fail_loud_guard(req_fns, str(err_path))
+    # Always switch to Model Space (TILEMODE=1) during c:wd_insym2 / c:wd_wire_quik schematic editing,
+    # then restore Paper Space Layout ISO_A3 (TILEMODE=0) cleanly before saving!
+    pre_ms = '(setq _had_iso (member "ISO_A3" (layoutlist))) (if (= (getvar "TILEMODE") 0) (setvar "TILEMODE" 1)) '
+    post_ps = ' (if _had_iso (progn (setvar "TILEMODE" 0) (setvar "CTAB" "ISO_A3"))) '
     sentinel = (
         f'(setq _df (open {_lisp_str(str(done_path))} "w")) '
         f'(write-line "DONE" _df) (close _df)'
     )
-    full_cmd = f"(progn {_lisp_acade_load()} {guard} (if (not _missing) (progn {lisp_body})) {sentinel})\n"
+    full_cmd = f"(progn {_lisp_acade_load()} {guard} (if (not _missing) (progn {pre_ms} {lisp_body} {post_ps})) {sentinel})\n"
     res = tool_autocad_run_command({"command": full_cmd, "auto_save": auto_save})
 
     deadline = time.monotonic() + timeout_sec
@@ -742,38 +746,26 @@ $doc.SendCommand($cmd)
     return _run_ps(ps, timeout=75)
 
 
-def tool_acade_insert_schematic_symbol(args: dict[str, Any]) -> dict[str, Any]:
-    """Insert a real IEC-60617 schematic symbol via (c:wd_insym2), enforce IEC 81346 family & Parent/Child guards, and auto-break crossed wires."""
-    block_name = str(args["block_name"]).strip()
-    bn_up = block_name.upper().removesuffix(".DWG")
-    pt = args["point"]
-    scale = float(args.get("scale", 1.0))
-    attrs = dict(args.get("attributes") or {})
-    auto_save = bool(args.get("auto_save", True))
+SECOND_POLE_BLOCK_MAP = {
+    "VCB11Q13": "VCB21Q13",
+    "VCB11Q9": "VCB21Q9",
+    "VCB11TH": "VCB21TH",
+    "VCB1": "VCB21",
+    "VFU1": "VFU2",
+    "VFU1_S00371": "VFU2",
+    "VDS11": "VDS21",
+    "VDS11F": "VDS21F",
+    "VMS1NA21F": "VMS21P",
+    "VCR21": "VCR21",
+    "VCR22": "VCR22",
+    "VMS21P": "VMS21P",
+}
 
-    # Guard 1: Prevent Child contact blocks (4th char == '2', e.g. VMS2NA13F, VCR21, VW02) from receiving TAG1 without TAG2
-    is_child_blk = (len(bn_up) >= 4 and bn_up[0] in ("H", "V") and bn_up[3] == "2") or bn_up in ("VW02", "HW02")
-    if is_child_blk and "TAG1" in attrs and "TAG2" not in attrs:
-        raise ValueError(
-            f"IEC Parent/Child Violation: '{block_name}' is a Child symbol (4th char='2', uses TAG2), "
-            f"but 'TAG1={attrs['TAG1']}' was passed! Use a Parent symbol (4th char='1', e.g., VCB11Q13 or VMS1NA21F) "
-            f"for Parent devices, or pass 'TAG2' if placing a Child contact."
-        )
 
-    # Guard 2: Prevent relay coil VCR1/HCR1 misuse for VFD (-U*), Power Supply (-G*), or PLC/Switch/HMI (-A*)
-    raw_tag = str(attrs.get("TAG1") or attrs.get("TAG2") or "").strip().upper().lstrip("-=+")
-    # Strip optional leading sheet digits (e.g. "04G1" -> "G1")
-    tag_alpha = raw_tag.lstrip("0123456789")
-    if bn_up in ("VCR1", "HCR1") and tag_alpha[:1] in ("U", "G", "A"):
-        raise ValueError(
-            f"IEC 60617 Symbol Misuse: Relay coil '{block_name}' cannot represent '{attrs.get('TAG1')}' (family '{tag_alpha[:1]}'). "
-            f"Use 'VU1_VFD_3P' for VFDs (-U*), 'VG1_PSU_24V' for Power Supplies (-G*), 'VA4_NET_BOX' / 'VA1_WEIGH_TRANS' / 'HP1W--L' for Modules (-A*)."
-        )
-
-    mod_exprs = [f'(c:wd_modattrval _ent {_lisp_str(k)} {_lisp_str(v)} nil)' for k, v in attrs.items()]
-    # Auto-break any existing wire LINE piercing straight across opposite X2TERM/X8TERM or X4TERM/X1TERM pins of _ent
-    trim_wire_lisp = (
-        '(setq _p2 nil _p8 nil _p4 nil _p1 nil _an (entnext _ent)) '
+def _lisp_trim_wire_under_ent(ent_var: str = "_ent") -> str:
+    """Emit AutoLISP that reads X2/X8 or X4/X1 pins on `ent_var` and splits any crossing wire LINE cleanly."""
+    return (
+        f'(setq _p2 nil _p8 nil _p4 nil _p1 nil _an (entnext {ent_var})) '
         '(while (and _an (= (cdr (assoc 0 (entget _an))) "ATTRIB")) '
         '(setq _ad (entget _an) _at (strcase (cdr (assoc 2 _ad))) _ap (cdr (assoc 10 _ad))) '
         '(cond ((wcmatch _at "X2TERM*") (setq _p2 (cons _ap _p2))) '
@@ -781,7 +773,6 @@ def tool_acade_insert_schematic_symbol(args: dict[str, Any]) -> dict[str, Any]:
         '((wcmatch _at "X4TERM*") (setq _p4 (cons _ap _p4))) '
         '((wcmatch _at "X1TERM*") (setq _p1 (cons _ap _p1)))) '
         '(setq _an (entnext _an))) '
-        # Vertical wire split if symbol has both X2TERM (top) and X8TERM (bottom) at matching X
         '(foreach _t2 _p2 (foreach _t8 _p8 '
         '(if (< (abs (- (car _t2) (car _t8))) 0.25) '
         '(progn (setq _vx (car _t2) _vyhi (max (cadr _t2) (cadr _t8)) _vylo (min (cadr _t2) (cadr _t8)) '
@@ -796,7 +787,6 @@ def tool_acade_insert_schematic_symbol(args: dict[str, Any]) -> dict[str, Any]:
         '(if (> _lymax (+ _vyhi 0.2)) (entmake (list \'(0 . "LINE") (cons 8 _la) (list 10 _vx _lymax 0.0) (list 11 _vx _vyhi 0.0)))) '
         '(if (< _lymin (- _vylo 0.2)) (entmake (list \'(0 . "LINE") (cons 8 _la) (list 10 _vx _vylo 0.0) (list 11 _vx _lymin 0.0)))))) '
         '(setq _wi (1+ _wi))))))))) '
-        # Horizontal wire split if symbol has both X4TERM (left) and X1TERM (right) at matching Y
         '(foreach _t4 _p4 (foreach _t1 _p1 '
         '(if (< (abs (- (cadr _t4) (cadr _t1))) 0.25) '
         '(progn (setq _hy (cadr _t4) _hxhi (max (car _t4) (car _t1)) _hxlo (min (car _t4) (car _t1)) '
@@ -812,11 +802,100 @@ def tool_acade_insert_schematic_symbol(args: dict[str, Any]) -> dict[str, Any]:
         '(if (> _lxmax (+ _hxhi 0.2)) (entmake (list \'(0 . "LINE") (cons 8 _la) (list 10 _hxhi _hy 0.0) (list 11 _lxmax _hy 0.0)))))) '
         '(setq _wi (1+ _wi)))))))))'
     )
-    lisp_body = (
-        f"(setq _ent (c:wd_insym2 {_lisp_str(block_name)} '({float(pt[0])} {float(pt[1])} 0.0) {scale} nil)) "
+
+
+def _build_symbol_lisp(
+    block_name: str,
+    pt: list[float],
+    attrs: dict[str, Any],
+    scale: float = 1.0,
+    poles: int = 1,
+    pole_spacing: float = 10.0,
+) -> str:
+    """Build AutoLISP to insert 1-pole or multi-pole (2P/3P/4P) linked IEC symbols and cut all phase wires."""
+    bn_up = block_name.upper().removesuffix(".DWG")
+    x0, y0 = float(pt[0]), float(pt[1])
+    # Guard 0: Enforce Safe Schematic Viewport Drawing Zone (X in [25..405], Y in [12..276], outside Title Block [235..415, 5..41])
+    max_x = x0 + max(0, poles - 1) * pole_spacing
+    if x0 < 22.0 or max_x > 410.0 or y0 < 10.0 or y0 > 278.0:
+        raise ValueError(
+            f"Safe Zone Violation: Symbol '{block_name}' at ({x0}, {y0}) exceeds Schematic Safe Zone [25..405, 12..276]!"
+        )
+    if max_x > 232.0 and y0 < 45.0:
+        raise ValueError(
+            f"Title Block Clash: Symbol '{block_name}' at ({x0}, {y0}) intrudes into Paper Space Title Block zone [235..415, 5..41]!"
+        )
+
+    is_child_blk = (len(bn_up) >= 4 and bn_up[0] in ("H", "V") and bn_up[3] == "2") or bn_up in ("VW02", "HW02")
+    if is_child_blk and "TAG1" in attrs and "TAG2" not in attrs:
+        raise ValueError(
+            f"IEC Parent/Child Violation: '{block_name}' is a Child symbol (4th char='2', uses TAG2), "
+            f"but 'TAG1={attrs['TAG1']}' was passed! Use a Parent symbol (e.g., VCB11Q13, VFU1) or pass 'TAG2'."
+        )
+
+    raw_tag = str(attrs.get("TAG1") or attrs.get("TAG2") or "").strip().upper().lstrip("-=+")
+    tag_alpha = raw_tag.lstrip("0123456789")
+    if bn_up in ("VCR1", "HCR1") and tag_alpha[:1] in ("U", "G", "A"):
+        raise ValueError(
+            f"IEC 60617 Symbol Misuse: Relay coil '{block_name}' cannot represent '{attrs.get('TAG1')}' (family '{tag_alpha[:1]}'). "
+            f"Use 'VU1_VFD_3P' for VFDs (-U*), 'VG1_PSU_24V' for Power Supplies (-G*), 'VA4_NET_BOX' / 'VA1_WEIGH_TRANS' / 'HP1W--L' for Modules (-A*)."
+        )
+
+    p1_attrs = dict(attrs)
+    if poles >= 2:
+        p1_attrs.setdefault("TERM01", "1")
+        p1_attrs.setdefault("TERM02", "2")
+
+    mod_exprs = [f'(c:wd_modattrval _ent {_lisp_str(k)} {_lisp_str(str(v))} nil)' for k, v in p1_attrs.items()]
+    parts = [
+        f"(setq _ent (c:wd_insym2 {_lisp_str(block_name)} '({x0} {y0} 0.0) {scale} nil)) "
         f"(if (not _ent) (princ \"\\n[ACADE_ERR] wd_insym2 returned nil\\n\") "
-        f"(progn {' '.join(mod_exprs)} (entupd _ent) {trim_wire_lisp}))"
-    )
+        f"(progn {' '.join(mod_exprs)} (entupd _ent) {_lisp_trim_wire_under_ent('_ent')}))"
+    ]
+
+    if poles >= 2:
+        sec_blk = SECOND_POLE_BLOCK_MAP.get(bn_up)
+        if not sec_blk:
+            raise ValueError(
+                f"Multi-pole mode (poles={poles}) not supported for '{block_name}'. "
+                f"Supported multi-pole roots: {sorted(SECOND_POLE_BLOCK_MAP.keys())}"
+            )
+        parent_tag = str(attrs.get("TAG1") or attrs.get("TAG2") or "")
+        loc_val = str(attrs.get("LOC") or "+MAIN_PNL")
+        inst_val = str(attrs.get("INST") or "")
+        for p_idx in range(1, poles):
+            px = x0 + p_idx * pole_spacing
+            t_top = str(p_idx * 2 + 1)
+            t_bot = str(p_idx * 2 + 2)
+            parts.append(
+                f"(setq _entp (c:wd_insym2 {_lisp_str(sec_blk)} '({px} {y0} 0.0) {scale} nil)) "
+                f"(if _entp (progn "
+                f'(c:wd_modattrval _entp "TAG2" {_lisp_str(parent_tag)} nil) '
+                f'(c:wd_modattrval _entp "TERM01" {_lisp_str(t_top)} nil) '
+                f'(c:wd_modattrval _entp "TERM02" {_lisp_str(t_bot)} nil) '
+                f'(c:wd_modattrval _entp "LOC" {_lisp_str(loc_val)} nil) '
+                f'(c:wd_modattrval _entp "INST" {_lisp_str(inst_val)} nil) '
+                f"(entupd _entp) {_lisp_trim_wire_under_ent('_entp')}))"
+            )
+        # Mechanical dashed linkage line on LINK layer across all poles (X0 -> X0 + (poles-1)*spacing)
+        link_y = y0 - 8.0 if "Q13" in bn_up else y0
+        parts.append(
+            f'(entmake (list \'(0 . "LINE") \'(8 . "LINK") (list 10 {x0 - 1.5} {link_y} 0.0) (list 11 {max_x - 1.5} {link_y} 0.0)))'
+        )
+    return " ".join(parts)
+
+
+def tool_acade_insert_schematic_symbol(args: dict[str, Any]) -> dict[str, Any]:
+    """Insert a 1-pole or multi-pole (poles=2|3|4) IEC-60617 schematic symbol, enforce Safe Zone & family guards, and auto-break all crossed wires."""
+    block_name = str(args["block_name"]).strip()
+    pt = args["point"]
+    scale = float(args.get("scale", 1.0))
+    poles = int(args.get("poles", 1))
+    pole_spacing = float(args.get("pole_spacing", 10.0))
+    attrs = dict(args.get("attributes") or {})
+    auto_save = bool(args.get("auto_save", True))
+
+    lisp_body = _build_symbol_lisp(block_name, pt, attrs, scale=scale, poles=poles, pole_spacing=pole_spacing)
     return _run_acade_lisp_checked(lisp_body, ["c:wd_insym2", "c:wd_modattrval"], auto_save=auto_save)
 
 
@@ -939,10 +1018,20 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
         key = (row.get("RACK", "0").strip(), row.get("SLOT", "2").strip(), row.get("CODE", "").strip())
         modules.setdefault(key, []).append(row)
 
+    if len(modules) > 2:
+        raise ValueError(
+            f"PLC Sheet Overflow: CSV has {len(modules)} modules, exceeding the A3 Safe Zone limit of 2 PLC columns per sheet! "
+            "Split your CSV so each PLC sheet has at most 2 modules."
+        )
+
     lisp_parts: list[str] = ['(regapp "VIA_WD_WIRETYPE")']
     for mod_idx, ((rack, slot, code), ch_rows) in enumerate(modules.items()):
-        mx = 180.0 + mod_idx * 185.0
-        my = 265.0
+        if len(ch_rows) > 10:
+            raise ValueError(
+                f"PLC Column Overflow: Module Slot {slot} has {len(ch_rows)} rows (max 10 channels per column on A3 without intruding into Title Block)."
+            )
+        mx = 172.0 + mod_idx * 182.0
+        my = 256.0  # Safe Y<=256 so INST/LOC attributes above HP1W--L stay strictly <= 283mm (below Y=287 X-Zone bar!)
         mod_tag = f"-A1:S{slot}"
         first_inst = (ch_rows[0].get("INST") or "=PLC1").strip() if ch_rows else "=PLC1"
         is_do_mod = any((r.get("ADDRESS") or "").strip().upper().lstrip("%").startswith("Q") for r in ch_rows)
@@ -1477,6 +1566,195 @@ def tool_acade_insert_cable_and_jumper(args: dict[str, Any]) -> dict[str, Any]:
     return _run_acade_lisp_checked(lisp_body, ["c:wd_insym2", "c:wd_modattrval"], auto_save=auto_save)
 
 
+def tool_acade_insert_verified_circuit(args: dict[str, Any]) -> dict[str, Any]:
+    """Insert a verified, DRC-clean industrial circuit macro (BUS_3PH_N_PE, DOL_3P, VFD_3P, PSU_24VDC_PELV) with 100% multi-pole & PELV compliance."""
+    ctype = str(args["circuit_type"]).strip().upper()
+    x0 = float(args.get("origin_x", 90.0))
+    bus_ys = args.get("bus_ys") or [272.0, 265.0, 258.0, 251.0, 244.0]  # L1, L2, L3, N, PE
+    y_l1, y_l2, y_l3, y_n, y_pe = [float(v) for v in bus_ys]
+    auto_save = bool(args.get("auto_save", True))
+
+    wires: list[dict[str, Any]] = []
+    dots: list[list[float]] = []
+    arrows: list[dict[str, Any]] = []
+    sym_lisps: list[str] = []
+
+    if ctype == "BUS_3PH_N_PE":
+        x_end = float(args.get("x_end", 395.0))
+        bus_defs = [
+            (y_l1, "PWR_L1_BK_2.5", "L1", "BUS_L1_400VAC"),
+            (y_l2, "PWR_L2_BK_2.5", "L2", "BUS_L2_400VAC"),
+            (y_l3, "PWR_L3_BK_2.5", "L3", "BUS_L3_400VAC"),
+            (y_n, "PWR_N_BU_2.5", "N", "BUS_N_400VAC"),
+            (y_pe, "PWR_PE_GNYE_2.5", "PE", "BUS_PE"),
+        ]
+        for by, blyr, term_lbl, sig in bus_defs:
+            wires.append({"p1": [42.0, by], "p2": [x_end, by], "layer": blyr})
+            sym_lisps.append(
+                _build_symbol_lisp(
+                    "ht0001",
+                    [40.0, by],
+                    {"TAGSTRIP": "-X0", "TERM01": term_lbl, "MFG": "PHOENIX CONTACT", "CAT": "3044199", "LOC": "+MAIN_PNL"},
+                )
+            )
+            arrows.append({"kind": "source", "point": [x_end, by], "sigcode": sig, "wireno": term_lbl})
+
+    elif ctype == "DOL_3P":
+        # Complete 3-pole DOL motor feeder: 3P MPCB (-Q*) + 3P Contactor Contacts (-K*) + Motor (-M*) + isolated PE wire to bottom X8TERM04!
+        x1, x2, x3, x_pe = x0, x0 + 10.0, x0 + 20.0, x0 + 30.0
+        q_tag = str(args.get("mpcb_tag", "-Q2"))
+        k_tag = str(args.get("contactor_tag", "-K1"))
+        m_tag = str(args.get("motor_tag", "-M1"))
+        inst = str(args.get("inst", "=PLC1"))
+        desc1 = str(args.get("desc1", "MOTOR 3P DOL"))
+        m_y = 85.0
+        # 3 phase vertical drops from L1, L2, L3 down to just above motor, then angled cleanly to VMO13 pins (-6.4,+3.9), (0,+7.5), (+6.4,+3.9)
+        wires.extend([
+            {"p1": [x1, y_l1], "p2": [x1, m_y + 12.0], "layer": "PWR_L1_BK_2.5"},
+            {"p1": [x1, m_y + 12.0], "p2": [x2 - 6.4, m_y + 3.9], "layer": "PWR_L1_BK_2.5"},
+            {"p1": [x2, y_l2], "p2": [x2, m_y + 7.5], "layer": "PWR_L2_BK_2.5"},
+            {"p1": [x3, y_l3], "p2": [x3, m_y + 12.0], "layer": "PWR_L3_BK_2.5"},
+            {"p1": [x3, m_y + 12.0], "p2": [x2 + 6.4, m_y + 3.9], "layer": "PWR_L3_BK_2.5"},
+            # Dedicated PE drop at x_pe (NEVER touching L1/L2/L3!) going under motor to bottom PE pin X8TERM04 @ (x2, m_y - 7.5)
+            {"p1": [x_pe, y_pe], "p2": [x_pe, m_y - 14.0], "layer": "PWR_PE_GNYE_2.5"},
+            {"p1": [x_pe, m_y - 14.0], "p2": [x2, m_y - 14.0], "layer": "PWR_PE_GNYE_2.5"},
+            {"p1": [x2, m_y - 14.0], "p2": [x2, m_y - 7.5], "layer": "PWR_PE_GNYE_2.5"},
+        ])
+        dots.extend([[x1, y_l1], [x2, y_l2], [x3, y_l3], [x_pe, y_pe]])
+        sym_lisps.extend([
+            _build_symbol_lisp(
+                "VCB11Q13",
+                [x1, 215.0],
+                {"TAG1": q_tag, "MFG": "SIEMENS", "CAT": str(args.get("mpcb_cat", "3RV2021-4AA10")), "LOC": "+MAIN_PNL", "INST": inst, "DESC1": f"MPCB {m_tag}"},
+                poles=3,
+                pole_spacing=10.0,
+            ),
+            _build_symbol_lisp(
+                "VCR21",
+                [x1, 155.0],
+                {"TAG2": k_tag, "LOC": "+MAIN_PNL", "INST": inst, "DESC1": f"MAIN CONTACTS {k_tag}"},
+                poles=3,
+                pole_spacing=10.0,
+            ),
+            _build_symbol_lisp(
+                "VMO13",
+                [x2, m_y],
+                {"TAG1": m_tag, "MFG": "SIEMENS", "CAT": str(args.get("motor_cat", "1LE1001-1BB22")), "LOC": "+FIELD", "INST": inst, "DESC1": desc1},
+            ),
+        ])
+
+    elif ctype == "VFD_3P":
+        # Complete 3-pole VFD feeder using VU1_VFD_3P (w=52, h=64): top X2TERM01..03 @ +11,+26,+41; bot X8TERM04..07 @ +8,+20,+32,+44(PE)
+        q_tag = str(args.get("mpcb_tag", "-Q6"))
+        u_tag = str(args.get("vfd_tag", "-U1"))
+        m_tag = str(args.get("motor_tag", "-M2"))
+        inst = str(args.get("inst", "=PLC1"))
+        u_x, u_y = x0, 128.0  # VU1_VFD_3P spans X=[x0..x0+52], Y=[128..192]; top pins at Y=197, bot pins at Y=123
+        x_l1, x_l2, x_l3 = u_x + 11.0, u_x + 26.0, u_x + 41.0
+        x_u, x_v, x_w, x_pe = u_x + 8.0, u_x + 20.0, u_x + 32.0, u_x + 44.0
+        m_y = 75.0
+        wires.extend([
+            {"p1": [x_l1, y_l1], "p2": [x_l1, u_y + 69.0], "layer": "PWR_L1_BK_2.5"},
+            {"p1": [x_l2, y_l2], "p2": [x_l2, u_y + 69.0], "layer": "PWR_L2_BK_2.5"},
+            {"p1": [x_l3, y_l3], "p2": [x_l3, u_y + 69.0], "layer": "PWR_L3_BK_2.5"},
+            # VFD chassis PE from PE bus around right side to bottom PE pin (x_pe, u_y - 5.0)
+            {"p1": [u_x + 58.0, y_pe], "p2": [u_x + 58.0, u_y - 12.0], "layer": "PWR_PE_GNYE_2.5"},
+            {"p1": [u_x + 58.0, u_y - 12.0], "p2": [x_pe, u_y - 12.0], "layer": "PWR_PE_GNYE_2.5"},
+            {"p1": [x_pe, u_y - 12.0], "p2": [x_pe, u_y - 5.0], "layer": "PWR_PE_GNYE_2.5"},
+            # VFD U, V, W outputs to VMO13 @ (x_v, m_y) + Motor PE to bottom X8TERM04
+            {"p1": [x_u, u_y - 5.0], "p2": [x_u, m_y + 12.0], "layer": "PWR_L1_BK_2.5"},
+            {"p1": [x_u, m_y + 12.0], "p2": [x_v - 6.4, m_y + 3.9], "layer": "PWR_L1_BK_2.5"},
+            {"p1": [x_v, u_y - 5.0], "p2": [x_v, m_y + 7.5], "layer": "PWR_L2_BK_2.5"},
+            {"p1": [x_w, u_y - 5.0], "p2": [x_w, m_y + 12.0], "layer": "PWR_L3_BK_2.5"},
+            {"p1": [x_w, m_y + 12.0], "p2": [x_v + 6.4, m_y + 3.9], "layer": "PWR_L3_BK_2.5"},
+            {"p1": [x_pe, u_y - 12.0], "p2": [x_pe, m_y - 14.0], "layer": "PWR_PE_GNYE_2.5"},
+            {"p1": [x_pe, m_y - 14.0], "p2": [x_v, m_y - 14.0], "layer": "PWR_PE_GNYE_2.5"},
+            {"p1": [x_v, m_y - 14.0], "p2": [x_v, m_y - 7.5], "layer": "PWR_PE_GNYE_2.5"},
+        ])
+        dots.extend([[x_l1, y_l1], [x_l2, y_l2], [x_l3, y_l3], [u_x + 58.0, y_pe], [x_pe, u_y - 12.0]])
+        sym_lisps.extend([
+            _build_symbol_lisp(
+                "VCB11Q13",
+                [x_l1, 226.0],
+                {"TAG1": q_tag, "MFG": "SIEMENS", "CAT": str(args.get("mpcb_cat", "3RV2021-4AA10")), "LOC": "+MAIN_PNL", "INST": inst, "DESC1": f"MPCB {u_tag}"},
+                poles=3,
+                pole_spacing=15.0,
+            ),
+            _build_symbol_lisp(
+                "VU1_VFD_3P",
+                [u_x, u_y],
+                {"TAG1": u_tag, "MFG": "SIEMENS", "CAT": str(args.get("vfd_cat", "6SL3210-1KE18-8UF2")), "LOC": "+MAIN_PNL", "INST": inst, "DESC1": str(args.get("desc1", "SINAMICS G120C VFD"))},
+            ),
+            _build_symbol_lisp(
+                "VMO13",
+                [x_v, m_y],
+                {"TAG1": m_tag, "MFG": "SIEMENS", "CAT": str(args.get("motor_cat", "1LE1001-1BB22")), "LOC": "+FIELD", "INST": inst, "DESC1": f"MOTOR {m_tag}"},
+            ),
+        ])
+
+    elif ctype == "PSU_24VDC_PELV":
+        # Complete IEC 60204-1 Grounded PELV 24VDC Power Supply:
+        # 2-pole MCB (-Q3) cutting BOTH L and N -> VG1_PSU_24V top L1(+8), N(+21), PE(+34);
+        # Bottom isolated +24V(+12) & 0V(+30) -> 0VDC grounded to PE bar + paired Source Arrows!
+        q_tag = str(args.get("mcb_tag", "-Q3"))
+        g_tag = str(args.get("psu_tag", "-G1"))
+        inst = str(args.get("inst", "=MAIN"))
+        phase_bus_y = {"L1": y_l1, "L2": y_l2, "L3": y_l3}.get(str(args.get("phase", "L1")).upper(), y_l1)
+        phase_lyr = {"L1": "PWR_L1_BK_2.5", "L2": "PWR_L2_BK_2.5", "L3": "PWR_L3_BK_2.5"}.get(str(args.get("phase", "L1")).upper(), "PWR_L1_BK_2.5")
+        sig_24v = str(args.get("sig_24v", "BUS_24VDC_PELV"))
+        sig_0v = str(args.get("sig_0v", "BUS_0VDC_PELV"))
+        wno_24v = str(args.get("wno_24v", "+24VDC"))
+        wno_0v = str(args.get("wno_0v", "0VDC"))
+
+        g_x, g_y = x0, 125.0  # VG1_PSU_24V (w=42, h=46): top pins @ Y=176 (+8 L1, +21 N, +34 PE); bot pins @ Y=120 (+12 +24V, +30 0V)
+        x_l, x_n, x_pe = g_x + 8.0, g_x + 21.0, g_x + 34.0
+        x_24v, x_0v = g_x + 12.0, g_x + 30.0
+        out_24_y = float(args.get("out_24_y", 96.0))
+        out_0v_y = float(args.get("out_0v_y", 82.0))
+        arr_x = float(args.get("arrow_x", min(395.0, g_x + 75.0)))
+
+        wires.extend([
+            # AC Input L, N (both cut through 2-pole MCB -Q3!) + PE into VG1_PSU_24V top pins
+            {"p1": [x_l, phase_bus_y], "p2": [x_l, g_y + 51.0], "layer": phase_lyr},
+            {"p1": [x_n, y_n], "p2": [x_n, g_y + 51.0], "layer": "PWR_N_BU_2.5"},
+            {"p1": [x_pe, y_pe], "p2": [x_pe, g_y + 51.0], "layer": "PWR_PE_GNYE_2.5"},
+            # Galvanically isolated DC Output +24VDC & 0VDC from bottom pins
+            {"p1": [x_24v, g_y - 5.0], "p2": [x_24v, out_24_y], "layer": "CTRL_24VDC_DBU_0.75"},
+            {"p1": [x_24v, out_24_y], "p2": [arr_x, out_24_y], "layer": "CTRL_24VDC_DBU_0.75"},
+            {"p1": [x_0v, g_y - 5.0], "p2": [x_0v, out_0v_y], "layer": "CTRL_0VDC_WHBU_0.75"},
+            {"p1": [x_0v, out_0v_y], "p2": [arr_x, out_0v_y], "layer": "CTRL_0VDC_WHBU_0.75"},
+            # IEC 60204-1 Grounded PELV bond: 0VDC bonded to PE via dedicated PE link at x_pe + 10
+            {"p1": [g_x + 46.0, y_pe], "p2": [g_x + 46.0, out_0v_y], "layer": "PWR_PE_GNYE_2.5"},
+            {"p1": [x_0v, out_0v_y], "p2": [g_x + 46.0, out_0v_y], "layer": "PWR_PE_GNYE_2.5"},
+        ])
+        dots.extend([[x_l, phase_bus_y], [x_n, y_n], [x_pe, y_pe], [g_x + 46.0, y_pe], [x_0v, out_0v_y]])
+        arrows.extend([
+            {"kind": "source", "point": [arr_x, out_24_y], "sigcode": sig_24v, "wireno": wno_24v},
+            {"kind": "source", "point": [arr_x, out_0v_y], "sigcode": sig_0v, "wireno": wno_0v},
+        ])
+        sym_lisps.extend([
+            _build_symbol_lisp(
+                "VCB11Q13",
+                [x_l, 222.0],
+                {"TAG1": q_tag, "MFG": "SIEMENS", "CAT": "5SL6210-7", "LOC": "+MAIN_PNL", "INST": inst, "DESC1": f"MCB 2P 10A {g_tag}"},
+                poles=2,
+                pole_spacing=13.0,
+            ),
+            _build_symbol_lisp(
+                "VG1_PSU_24V",
+                [g_x, g_y],
+                {"TAG1": g_tag, "MFG": "SIEMENS", "CAT": str(args.get("psu_cat", "6EP1334-2BA20")), "LOC": "+MAIN_PNL", "INST": inst, "DESC1": str(args.get("desc1", "SITOP 24VDC 10A PELV"))},
+            ),
+        ])
+    else:
+        raise ValueError(f"Unsupported circuit_type '{ctype}'. Choose from: BUS_3PH_N_PE, DOL_3P, VFD_3P, PSU_24VDC_PELV.")
+
+    # Draw smart wires + dots + arrows FIRST, then insert & auto-trim multi-pole symbols SECOND!
+    wire_res = tool_acade_draw_smart_wires_and_arrows({"wires": wires, "dots": dots, "arrows": arrows, "auto_save": False})
+    sym_res = _run_acade_lisp_checked(" ".join(sym_lisps), ["c:wd_insym2", "c:wd_modattrval"], auto_save=auto_save, timeout_sec=45.0)
+    return {"circuit_type": ctype, "wires_drawn": len(wires), "symbols_groups": len(sym_lisps), "wire_res": wire_res, "sym_res": sym_res}
+
+
 def tool_acade_electrical_audit(args: dict[str, Any]) -> dict[str, Any]:
     """Run Fail-Closed Database + DWG Gatekeeper v2.0 audit on Project Scratch .mdb and optional project_dir."""
     mdb_path = Path(args["mdb_path"]).resolve()
@@ -1611,18 +1889,43 @@ TOOLS = [
     },
     {
         "name": "acade_insert_schematic_symbol",
-        "description": "Insert a real IEC-60617 symbol via (c:wd_insym2) (auto-breaks wire at X?TERM??) and populate TAG1/TAG2, MFG, CAT, LOC, INST, DESC1..3, TERM01, ASSYCODE.",
+        "description": "Insert a 1-pole or multi-pole (poles=2|3|4) IEC-60617 symbol via (c:wd_insym2) in Safe Zone [25..405, 12..276], link mechanical poles on LINK layer, and auto-break all crossed phase wires.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "block_name": {"type": "string"},
                 "point": {"type": "array", "items": {"type": "number"}},
+                "poles": {"type": "integer", "enum": [1, 2, 3, 4], "default": 1, "description": "Number of linked poles (use 3 for 3-phase CB/MPCB/Fuse/Contactor, 2 for L+N 2-pole MCB)."},
+                "pole_spacing": {"type": "number", "default": 10.0, "description": "Horizontal spacing in mm between adjacent poles."},
                 "scale": {"type": "number", "default": 1.0},
                 "options": {"type": "integer", "default": 0},
                 "attributes": {"type": "object"},
                 "auto_save": {"type": "boolean", "default": True},
             },
             "required": ["block_name", "point"],
+        },
+    },
+    {
+        "name": "acade_insert_verified_circuit",
+        "description": "Insert a pre-engineered, DRC-clean industrial circuit macro: BUS_3PH_N_PE (3P+N+PE busbars), DOL_3P (3P MPCB + 3P Contactor + Motor + isolated PE), VFD_3P (3P MPCB + VU1_VFD_3P + Motor + PE), or PSU_24VDC_PELV (2P L+N MCB + VG1_PSU_24V + Grounded PELV 0VDC->PE).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "circuit_type": {"type": "string", "enum": ["BUS_3PH_N_PE", "DOL_3P", "VFD_3P", "PSU_24VDC_PELV"]},
+                "origin_x": {"type": "number", "default": 90.0},
+                "bus_ys": {"type": "array", "items": {"type": "number"}, "description": "[y_L1, y_L2, y_L3, y_N, y_PE]"},
+                "mpcb_tag": {"type": "string"},
+                "mcb_tag": {"type": "string"},
+                "contactor_tag": {"type": "string"},
+                "vfd_tag": {"type": "string"},
+                "psu_tag": {"type": "string"},
+                "motor_tag": {"type": "string"},
+                "phase": {"type": "string", "enum": ["L1", "L2", "L3"]},
+                "inst": {"type": "string"},
+                "desc1": {"type": "string"},
+                "auto_save": {"type": "boolean", "default": True},
+            },
+            "required": ["circuit_type"],
         },
     },
     {
@@ -1728,6 +2031,7 @@ HANDLERS = {
     "autocad_audit_and_inspect": tool_autocad_audit_and_inspect,
     "acade_project_init": tool_acade_project_init,
     "acade_insert_schematic_symbol": tool_acade_insert_schematic_symbol,
+    "acade_insert_verified_circuit": tool_acade_insert_verified_circuit,
     "acade_draw_smart_wires_and_arrows": tool_acade_draw_smart_wires_and_arrows,
     "acade_build_plc_from_csv": tool_acade_build_plc_from_csv,
     "acade_sync_panel_footprints": tool_acade_sync_panel_footprints,

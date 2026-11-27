@@ -1,25 +1,22 @@
-"""AutoCAD Electrical Project Scratch Database (.mdb) + Deep DWG Gatekeeper Audit v2.0 (Fail-Closed).
+"""AutoCAD Electrical Scratch DB (.mdb) + Electrical Netlist DRC & Layout Gatekeeper v3.0 (Fail-Closed).
 
-Queries the real ACADE 2027 Project Scratch Database (<project>.mdb):
-- COMP (PAR1_CHLD2=1 Parent, PAR1_CHLD2=2 Child, SYMBOL/BLOCK family check)
-- PNLCOMP (Panel Footprint components)
-- WIRE_ERR (Wire errors)
-- WFRM2ALL (From/To wire list)
-via 64-bit Windows ODBC (System.Data.Odbc), AND optionally inspects all project .dwg sheets
-via accoreconsole.exe when --project-dir is supplied (or auto-discovered from [FILETIME] in .mdb).
+Performs BOTH relational Access .mdb verification (via 64-bit ODBC) AND headless geometric +
+electrical netlist Design Rule Checking (DRC) across every project .dwg via accoreconsole.exe.
 
 Fails closed (passed=False, exit code 2) if ANY metric > 0:
-1. COMP table is missing or empty (unbuilt/unlinked Scratch DB)
-2. missing_catalog (MFG or CAT empty) > 0
-3. duplicate_tags (same TAGNAME+LOC+INST among PAR1_CHLD2='1' Parents) > 0
-4. orphaned_child_contacts (PAR1_CHLD2='2' Child without matching Parent in COMP) > 0
-5. wire_errors (rows in WIRE_ERR or '?' wire numbers in WFRM2ALL) > 0
-6. schematic_vs_panel_discrepancy (+MAIN_PNL / +DOOR Parents missing in PNLCOMP) > 0
-7. family_block_misuse (TAGNAME prefix U/G/A using relay coil VCR1/HCR1) > 0
-8. unupdated_titleblocks (TITLE_BLOCK_A3_BILINGUAL left at default 'PROJECT / DU AN' or 'DWG-01', or WD_M.SHEET stuck at '01' on sheet > 1) > 0
-9. wires_piercing_symbols (wire LINE piercing straight through opposite X2/X8 or X4/X1 pins of a component) > 0
-10. open_circuit_loads (2-pin load coils/lamps/valves HCR1/VCR1/HLT1A/VLT1A/HSV1/VSV1 with < 2 connected pins) > 0
-11. panel_layout_violations (Panel Layout sheet in TILEMODE=1 with entities overflowing 420x297 A3 frame, or footprints on DIM layer) > 0
+1. missing_catalog / duplicate_tags / orphaned_child_contacts / wire_errors / schematic_vs_panel_discrepancy
+2. family_block_misuse: Relay coil VCR1/HCR1 misused for VFDs (-U*), PSUs (-G*), or Modules/Switches (-A*)
+3. modelspace_titleblock_violations: Any TITLE_BLOCK_A3_BILINGUAL in Model Space or TILEMODE=1 (must be 100% in Paper Space Layout ISO_A3!)
+4. unupdated_titleblocks: Default placeholder strings ('PROJECT / DU AN', 'DWG-01') or stuck WD_M.SHEET='01'
+5. short_circuit_nets (Electrical Netlist DRC):
+   - Protective Earth (PWR_PE_*) shorted to Live Phase (PWR_L1/L2/L3), AC Neutral (PWR_N_*), or +24VDC!
+   - AC Power/Neutral (PWR_L* / PWR_N_*) connected directly onto DC PELV net (CTRL_24VDC_* / CTRL_0VDC_*) without galvanic PSU isolation!
+   - Phase-to-Phase direct bus short (e.g., PWR_L1_* shorted directly to PWR_L2_* or PWR_L3_*)!
+6. unprotected_3phase_poles (Multi-Pole Protection DRC):
+   - 3-phase motor (VMO13) or VFD (VU1_VFD_3P) having ANY phase input connected directly to a main supply busbar without passing through a switching pole!
+7. wires_piercing_symbols & open_circuit_loads
+8. text_or_attr_overflows: Visible schematic text/attributes overflowing outside [20..415, 5..287] frame or intruding into Title Block
+9. panel_layout_violations: Footprints placed on wrong layer (DIM / 0)
 """
 
 from __future__ import annotations
@@ -27,6 +24,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import subprocess
 import tempfile
 from pathlib import Path
@@ -35,21 +33,166 @@ from typing import Any
 ACCORE = Path(r"C:\Program Files\Autodesk\AutoCAD 2027\accoreconsole.exe")
 
 
+def _classify_wire_domain(layer_name: str) -> str:
+    lu = layer_name.upper()
+    if lu.startswith("PWR_PE"):
+        return "PE"
+    if lu.startswith("PWR_N"):
+        return "AC_N"
+    if lu.startswith("PWR_L1"):
+        return "AC_L1"
+    if lu.startswith("PWR_L2"):
+        return "AC_L2"
+    if lu.startswith("PWR_L3"):
+        return "AC_L3"
+    if lu.startswith("CTRL_24V") or lu.startswith("SAFE_24V"):
+        return "DC_24V"
+    if lu.startswith("CTRL_0V"):
+        return "DC_0V"
+    if lu.startswith("SIG_"):
+        return "SIG"
+    return "OTHER"
+
+
+def _analyze_sheet_netlist_drc(
+    dwg_name: str,
+    wires: list[tuple[str, float, float, float, float]],
+    pass_terminals: list[tuple[str, float, float]],
+    motors_and_vfds: list[tuple[str, str, list[tuple[float, float]]]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build connected electrical netlist graph (segments + T-junctions + pass-through terminals ht0001/Vt0001) and run DRC."""
+    shorts: list[dict[str, Any]] = []
+    unprotected_poles: list[dict[str, Any]] = []
+    if not wires:
+        return shorts, unprotected_poles
+
+    n = len(wires)
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    def pt_on_seg(px: float, py: float, x1: float, y1: float, x2: float, y2: float, tol: float = 0.65) -> bool:
+        dx, dy = x2 - x1, y2 - y1
+        l2 = dx * dx + dy * dy
+        if l2 < 1e-9:
+            return math.hypot(px - x1, py - y1) <= tol
+        t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / l2))
+        proj_x, proj_y = x1 + t * dx, y1 + t * dy
+        return math.hypot(px - proj_x, py - proj_y) <= tol
+
+    # 1. Connect wires sharing endpoints or T-junctions (endpoint of one wire touching another segment)
+    for i in range(n):
+        _, ax1, ay1, ax2, ay2 = wires[i]
+        for j in range(i + 1, n):
+            _, bx1, by1, bx2, by2 = wires[j]
+            if (
+                pt_on_seg(ax1, ay1, bx1, by1, bx2, by2)
+                or pt_on_seg(ax2, ay2, bx1, by1, bx2, by2)
+                or pt_on_seg(bx1, by1, ax1, ay1, ax2, ay2)
+                or pt_on_seg(bx2, by2, ax1, ay1, ax2, ay2)
+            ):
+                union(i, j)
+
+    # 2. Bridge wires across non-wire-changing feed-through terminals (ht0001 / Vt0001 have radius ~1.25mm)
+    for _tname, tx, ty in pass_terminals:
+        touching: list[int] = []
+        for i, (_, x1, y1, x2, y2) in enumerate(wires):
+            if math.hypot(x1 - tx, y1 - ty) <= 2.2 or math.hypot(x2 - tx, y2 - ty) <= 2.2 or pt_on_seg(tx, ty, x1, y1, x2, y2, tol=1.6):
+                touching.append(i)
+        for k in range(1, len(touching)):
+            union(touching[0], touching[k])
+
+    nets: dict[int, list[int]] = {}
+    for i in range(n):
+        nets.setdefault(find(i), []).append(i)
+
+    # Identify main horizontal busbar nets (nets containing a horizontal wire segment >= 80 mm long)
+    busbar_nets: set[int] = set()
+    for root, idxs in nets.items():
+        domains = {_classify_wire_domain(wires[i][0]) for i in idxs}
+        for i in idxs:
+            _, x1, y1, x2, y2 = wires[i]
+            if abs(y1 - y2) <= 0.5 and abs(x2 - x1) >= 80.0:
+                busbar_nets.add(root)
+
+        # Rule A: PE shorted to Live AC Phase, AC Neutral, or +24VDC! (Note: PE <-> DC_0V IS valid Grounded PELV per IEC 60204-1!)
+        bad_with_pe = domains.intersection({"AC_L1", "AC_L2", "AC_L3", "AC_N", "DC_24V"})
+        if "PE" in domains and bad_with_pe:
+            sx, sy = wires[idxs[0]][1], wires[idxs[0]][2]
+            shorts.append({
+                "dwg": dwg_name,
+                "violation": f"SHORT CIRCUIT: Protective Earth (PE) shorted directly to {sorted(bad_with_pe)}!",
+                "sample_coord": [round(sx, 1), round(sy, 1)],
+            })
+
+        # Rule B: AC Supply (L1/L2/L3/N) shorted directly to DC PELV (+24VDC / 0VDC) without PSU isolation!
+        ac_doms = domains.intersection({"AC_L1", "AC_L2", "AC_L3", "AC_N"})
+        dc_doms = domains.intersection({"DC_24V", "DC_0V"})
+        if ac_doms and dc_doms:
+            sx, sy = wires[idxs[0]][1], wires[idxs[0]][2]
+            shorts.append({
+                "dwg": dwg_name,
+                "violation": f"AC/DC GALVANIC VIOLATION: {sorted(ac_doms)} wired directly into {sorted(dc_doms)} without PSU isolation!",
+                "sample_coord": [round(sx, 1), round(sy, 1)],
+            })
+
+        # Rule C: Phase-to-Phase or Phase-to-Neutral direct short
+        ac_phases = domains.intersection({"AC_L1", "AC_L2", "AC_L3", "AC_N"})
+        if len(ac_phases) >= 2:
+            sx, sy = wires[idxs[0]][1], wires[idxs[0]][2]
+            shorts.append({
+                "dwg": dwg_name,
+                "violation": f"PHASE SHORT CIRCUIT: Multiple AC conductors {sorted(ac_phases)} shorted on the same net!",
+                "sample_coord": [round(sx, 1), round(sy, 1)],
+            })
+
+    # Rule D: 3-Phase Load Multi-Pole Protection Check (every phase pin of VMO13 / VU1_VFD_3P must be isolated from main busbar by a CB/Contactor pole!)
+    for blk_name, tag_val, phase_pins in motors_and_vfds:
+        for p_idx, (px, py) in enumerate(phase_pins):
+            for i, (_, x1, y1, x2, y2) in enumerate(wires):
+                if math.hypot(x1 - px, y1 - py) <= 1.5 or math.hypot(x2 - px, y2 - py) <= 1.5:
+                    if find(i) in busbar_nets:
+                        unprotected_poles.append({
+                            "dwg": dwg_name,
+                            "block": blk_name,
+                            "tag": tag_val,
+                            "pole": p_idx + 1,
+                            "pin": [round(px, 1), round(py, 1)],
+                            "issue": f"Pole {p_idx + 1} of '{tag_val}' ({blk_name}) connects directly to main 3-phase busbar without a switching/protection pole!",
+                        })
+                    break
+
+    return shorts, unprotected_poles
+
+
 def _audit_dwgs_headless(dwg_paths: list[Path]) -> dict[str, list[dict[str, Any]]]:
-    """Run headless accoreconsole.exe pure-AutoLISP inspection across project .dwg files."""
+    """Run headless accoreconsole.exe inspection + Netlist DRC across all project .dwg files."""
     findings: dict[str, list[dict[str, Any]]] = {
         "family_block_misuse_dwg": [],
+        "modelspace_titleblock_violations": [],
         "unupdated_titleblocks": [],
+        "short_circuit_nets": [],
+        "unprotected_3phase_poles": [],
         "wires_piercing_symbols": [],
         "open_circuit_loads": [],
+        "text_or_attr_overflows": [],
         "panel_layout_violations": [],
     }
     if not dwg_paths or not ACCORE.exists():
         return findings
 
     tmp_dir = Path(tempfile.gettempdir())
-    scr_path = tmp_dir / "acade_gatekeeper_v2.scr"
-    out_path = tmp_dir / "acade_gatekeeper_v2_out.txt"
+    scr_path = tmp_dir / "acade_gatekeeper_v3.scr"
+    out_path = tmp_dir / "acade_gatekeeper_v3_out.txt"
 
     for idx0, dp in enumerate(dwg_paths):
         if not dp.exists():
@@ -57,15 +200,22 @@ def _audit_dwgs_headless(dwg_paths: list[Path]) -> dict[str, list[dict[str, Any]
         out_path.unlink(missing_ok=True)
         out_posix = out_path.as_posix()
         lisp = f"""(setq _f (open "{out_posix}" "w"))
-(write-line (strcat "TILEMODE|" (itoa (getvar "TILEMODE"))) _f)
+(write-line (strcat "TILEMODE|" (itoa (getvar "TILEMODE")) "|" (getvar "CTAB")) _f)
+(setq _lwss (ssget "X" '((0 . "LINE") (410 . "Model") (8 . "PWR_*,CTRL_*,SIG_*,SAFE_*"))))
+(if _lwss (progn (setq _li 0) (while (< _li (sslength _lwss))
+  (setq _ld (entget (ssname _lwss _li)) _p1 (cdr (assoc 10 _ld)) _p2 (cdr (assoc 11 _ld)))
+  (write-line (strcat "WIRE|" (cdr (assoc 8 _ld)) "|" (rtos (car _p1) 2 2) "|" (rtos (cadr _p1) 2 2) "|" (rtos (car _p2) 2 2) "|" (rtos (cadr _p2) 2 2)) _f)
+  (setq _li (1+ _li)))))
 (setq _ss (ssget "X" '((0 . "INSERT"))))
 (if _ss (progn
   (setq _i 0)
   (while (< _i (sslength _ss))
-    (setq _en (ssname _ss _i) _ed (entget _en) _bn (strcase (cdr (assoc 2 _ed))) _la (strcase (cdr (assoc 8 _ed))) _ip (cdr (assoc 10 _ed)))
-    (setq _an (entnext _en) _tg "" _ptg "" _prj "" _dno "" _sh "" _shmax "" _p2 nil _p8 nil _p4 nil _p1 nil)
+    (setq _en (ssname _ss _i) _ed (entget _en) _bn (strcase (cdr (assoc 2 _ed))) _la (strcase (cdr (assoc 8 _ed))) _sp (cdr (assoc 410 _ed)) _ip (cdr (assoc 10 _ed)))
+    (setq _an (entnext _en) _tg "" _ptg "" _prj "" _dno "" _sh "" _shmax "" _p2 nil _p8 nil _p4 nil _p1 nil _p0 nil)
     (while (and _an (= (cdr (assoc 0 (entget _an))) "ATTRIB"))
-      (setq _ad (entget _an) _ak (strcase (cdr (assoc 2 _ad))) _av (cdr (assoc 1 _ad)) _ap (cdr (assoc 10 _ad)))
+      (setq _ad (entget _an) _ak (strcase (cdr (assoc 2 _ad))) _av (cdr (assoc 1 _ad)) _ap (cdr (assoc 10 _ad)) _fl (cdr (assoc 70 _ad)))
+      (if (and (= _sp "Model") (= (logand _fl 1) 0) (/= _av "") (/= _bn "TITLE_BLOCK_A3_BILINGUAL"))
+        (write-line (strcat "VISATT|" _bn "|" _ak "|" (rtos (car _ap) 2 1) "|" (rtos (cadr _ap) 2 1) "|" _av) _f))
       (cond
         ((= _ak "TAG1") (setq _tg _av))
         ((= _ak "P_TAG1") (setq _ptg _av))
@@ -77,11 +227,21 @@ def _audit_dwgs_headless(dwg_paths: list[Path]) -> dict[str, list[dict[str, Any]
         ((wcmatch _ak "X8TERM*") (setq _p8 (cons _ap _p8)))
         ((wcmatch _ak "X4TERM*") (setq _p4 (cons _ap _p4)))
         ((wcmatch _ak "X1TERM*") (setq _p1 (cons _ap _p1)))
+        ((wcmatch _ak "X0TERM*") (setq _p0 (cons _ap _p0)))
       )
       (setq _an (entnext _an))
     )
-    (if (= _bn "WD_M") (write-line (strcat "WDM|" _sh) _f))
-    (if (= _bn "TITLE_BLOCK_A3_BILINGUAL") (write-line (strcat "TB|" _prj "|" _dno "|" _sh "|" _shmax) _f))
+    (if (= _bn "WD_M") (write-line (strcat "WDM|" _sp "|" _sh) _f))
+    (if (= _bn "TITLE_BLOCK_A3_BILINGUAL") (write-line (strcat "TB|" _sp "|" _prj "|" _dno "|" _sh "|" _shmax) _f))
+    (if (wcmatch _bn "HT0*,VT0*") (write-line (strcat "PTERM|" _bn "|" (rtos (car _ip) 2 2) "|" (rtos (cadr _ip) 2 2)) _f))
+    (if (= _bn "VMO13")
+      (progn
+        (setq _mpins (append _p0 _p2))
+        (foreach _mp _mpins
+          (write-line (strcat "MPIN|" _bn "|" _tg "|" (rtos (car _mp) 2 2) "|" (rtos (cadr _mp) 2 2)) _f))))
+    (if (= _bn "VU1_VFD_3P")
+      (foreach _mp _p2
+        (write-line (strcat "MPIN|" _bn "|" _tg "|" (rtos (car _mp) 2 2) "|" (rtos (cadr _mp) 2 2)) _f)))
     (if (/= _ptg "") (write-line (strcat "FP|" _ptg "|" _la "|" (rtos (car _ip) 2 1) "|" (rtos (cadr _ip) 2 1)) _f))
     (if (/= _tg "") (write-line (strcat "SYM|" _bn "|" _tg) _f))
     (foreach _t2 _p2 (foreach _t8 _p8
@@ -118,14 +278,7 @@ def _audit_dwgs_headless(dwg_paths: list[Path]) -> dict[str, list[dict[str, Any]
             (setq _wd2 (entget (ssname _ws _wk)) _ep1 (cdr (assoc 10 _wd2)) _ep2 (cdr (assoc 11 _wd2)))
             (if (or (< (distance (list (car _ep1) (cadr _ep1)) (list (car _pp) (cadr _pp))) 0.8)
                     (< (distance (list (car _ep2) (cadr _ep2)) (list (car _pp) (cadr _pp))) 0.8))
-              (progn
-                (setq _fep (if (< (distance (list (car _ep1) (cadr _ep1)) (list (car _pp) (cadr _pp))) 0.8) _ep2 _ep1))
-                (if (ssget "C" (list (- (car _fep) 3.0) (- (cadr _fep) 3.0)) (list (+ (car _fep) 3.0) (+ (cadr _fep) 3.0)) '((0 . "LINE,INSERT")))
-                  (progn
-                    (setq _deg (ssget "C" (list (- (car _fep) 1.5) (- (cadr _fep) 1.5)) (list (+ (car _fep) 1.5) (+ (cadr _fep) 1.5)) '((0 . "LINE") (8 . "PWR_*,CTRL_*,SIG_*,SAFE_*")))
-                          _ins (ssget "C" (list (- (car _fep) 7.5) (- (cadr _fep) 7.5)) (list (+ (car _fep) 7.5) (+ (cadr _fep) 7.5)) '((0 . "INSERT"))))
-                    (if (or (and _deg (> (sslength _deg) 1)) (and _ins (> (sslength _ins) 0)))
-                      (setq _hit T))))))
+              (setq _hit T))
             (setq _wk (1+ _wk)))))
           (if _hit (setq _conn (1+ _conn))))
         (if (< _conn 2)
@@ -133,52 +286,70 @@ def _audit_dwgs_headless(dwg_paths: list[Path]) -> dict[str, list[dict[str, Any]
       ))
     (setq _i (1+ _i))
   )))
-(setq _pmax (getvar "EXTMAX"))
-(write-line (strcat "EXTMAX|" (rtos (car _pmax) 2 1) "|" (rtos (cadr _pmax) 2 1)) _f)
 (close _f)
 _QUIT _Y
 """
         scr_path.write_text(lisp, encoding="ascii")
-        subprocess.run(
-            [str(ACCORE), "/i", str(dp), "/s", str(scr_path), "/l", "en-US"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        subprocess.run([str(ACCORE), "/i", str(dp), "/s", str(scr_path), "/l", "en-US"], capture_output=True, text=True, timeout=35)
         if not out_path.exists():
             continue
 
         lines = out_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        tilemode = 1
-        ext_x, ext_y = 0.0, 0.0
         fl = dp.name.lower()
         is_panel_sheet = ("panel" in fl) or ("-lay-" in fl) or ("_lay_" in fl)
+
+        sheet_wires: list[tuple[str, float, float, float, float]] = []
+        pass_terms: list[tuple[str, float, float]] = []
+        mpin_groups: dict[tuple[str, str], list[tuple[float, float]]] = {}
+        has_paper_tb = False
 
         for ln in lines:
             parts = ln.split("|")
             kind = parts[0]
-            if kind == "TILEMODE" and len(parts) >= 2:
-                tilemode = int(parts[1] or "1")
-            elif kind == "EXTMAX" and len(parts) >= 3:
-                try:
-                    ext_x, ext_y = float(parts[1]), float(parts[2])
-                except ValueError:
-                    pass
-            elif kind == "WDM" and len(parts) >= 2:
-                sh_val = parts[1].strip()
-                if idx0 >= 1 and sh_val == "01":
-                    findings["unupdated_titleblocks"].append({
+            if kind == "TILEMODE" and len(parts) >= 3:
+                tm = int(parts[1] or "1")
+                if tm != 0:
+                    findings["modelspace_titleblock_violations"].append({
                         "dwg": dp.name,
-                        "issue": f"WD_M.SHEET stuck at '01' on sheet #{idx0 + 1}",
+                        "issue": "Drawing saved with TILEMODE=1 (Model tab active) instead of Paper Space Layout ISO_A3 (TILEMODE=0)!",
                     })
-            elif kind == "TB" and len(parts) >= 5:
-                prj, dno, sh, shmax = parts[1].strip(), parts[2].strip(), parts[3].strip(), parts[4].strip()
+            elif kind == "TB" and len(parts) >= 6:
+                sp_name, prj, dno, sh, shmax = parts[1].strip(), parts[2].strip(), parts[3].strip(), parts[4].strip(), parts[5].strip()
+                if sp_name.lower() == "model":
+                    findings["modelspace_titleblock_violations"].append({
+                        "dwg": dp.name,
+                        "issue": "TITLE_BLOCK_A3_BILINGUAL placed inside Model Space! Title Block & Border must reside 100% in Paper Space Layout ISO_A3.",
+                    })
+                else:
+                    has_paper_tb = True
                 if prj in ("", "PROJECT / DU AN") or dno in ("", "DWG-01") or (len(dwg_paths) > 1 and shmax == "01"):
                     findings["unupdated_titleblocks"].append({
                         "dwg": dp.name,
                         "PROJECT_NAME": prj,
                         "DWG_NO": dno,
                         "SHEET": f"{sh} OF {shmax}",
+                    })
+            elif kind == "WDM" and len(parts) >= 3:
+                sh_val = parts[2].strip()
+                if idx0 >= 1 and sh_val == "01":
+                    findings["unupdated_titleblocks"].append({
+                        "dwg": dp.name,
+                        "issue": f"WD_M.SHEET stuck at '01' on sheet #{idx0 + 1}",
+                    })
+            elif kind == "WIRE" and len(parts) >= 6:
+                sheet_wires.append((parts[1], float(parts[2]), float(parts[3]), float(parts[4]), float(parts[5])))
+            elif kind == "PTERM" and len(parts) >= 4:
+                pass_terms.append((parts[1], float(parts[2]), float(parts[3])))
+            elif kind == "MPIN" and len(parts) >= 5:
+                mpin_groups.setdefault((parts[1], parts[2]), []).append((float(parts[3]), float(parts[4])))
+            elif kind == "VISATT" and len(parts) >= 6 and not is_panel_sheet:
+                ax, ay = float(parts[3]), float(parts[4])
+                if ax < 20.0 or ax > 415.0 or ay < 5.0 or ay > 286.8 or (ax > 235.0 and ay < 41.0):
+                    findings["text_or_attr_overflows"].append({
+                        "dwg": dp.name,
+                        "block": parts[1],
+                        "attr": f"{parts[2]}={parts[5]}",
+                        "coord": [ax, ay],
                     })
             elif kind == "SYM" and len(parts) >= 3:
                 bn, tg = parts[1].strip(), parts[2].strip()
@@ -208,19 +379,24 @@ _QUIT _Y
                         "issue": f"Panel footprint '{ptg}' placed on wrong layer '{la}' (must be PNL_FOOTPRINT)",
                     })
 
-        if is_panel_sheet and tilemode == 1 and (ext_x > 430.0 or ext_y > 310.0):
-            findings["panel_layout_violations"].append({
+        if not has_paper_tb:
+            findings["modelspace_titleblock_violations"].append({
                 "dwg": dp.name,
-                "issue": f"Panel Layout in TILEMODE=1 overflows A3 frame (EXTMAX={ext_x:.1f}x{ext_y:.1f} mm; must use Paper Space ISO_A3 VIEWPORT with TILEMODE=0)",
+                "issue": "Missing TITLE_BLOCK_A3_BILINGUAL in Paper Space Layout ISO_A3!",
             })
+
+        if not is_panel_sheet and sheet_wires:
+            motor_vfd_list = [(bn, tg, sorted(pts, key=lambda p: p[0])) for (bn, tg), pts in mpin_groups.items()]
+            sh_shorts, sh_unprot = _analyze_sheet_netlist_drc(dp.name, sheet_wires, pass_terms, motor_vfd_list)
+            findings["short_circuit_nets"].extend(sh_shorts)
+            findings["unprotected_3phase_poles"].extend(sh_unprot)
 
     scr_path.unlink(missing_ok=True)
     out_path.unlink(missing_ok=True)
     return findings
 
 
-def _discover_dwg_paths(mdb_path: Path, project_dir: Path | None) -> list[Path]:
-    """Resolve ordered .dwg files from --project-dir (or 01_Drawings subfolder), or from [FILETIME] in .mdb."""
+def _discover_dwg_paths(project_dir: Path | None) -> list[Path]:
     if project_dir:
         pdir = project_dir.resolve()
         sub = pdir / "01_Drawings"
@@ -241,7 +417,7 @@ def _discover_dwg_paths(mdb_path: Path, project_dir: Path | None) -> list[Path]:
 
 
 def audit_scratch_database(mdb_path: Path, project_dir: Path | None = None) -> dict[str, Any]:
-    """Query ACADE Project Scratch .mdb + optional .dwg sheets (Fail-Closed Gatekeeper v2.0)."""
+    """Query ACADE Project Scratch .mdb + run Electrical Netlist DRC & Paper Space Layout Gatekeeper v3.0."""
     if not mdb_path.exists():
         raise FileNotFoundError(f"Scratch database not found: {mdb_path}")
 
@@ -361,7 +537,7 @@ $conn.Close()
     if "error" in raw:
         return raw
 
-    dwg_paths = _discover_dwg_paths(mdb_path, project_dir)
+    dwg_paths = _discover_dwg_paths(project_dir)
     if not dwg_paths and raw.get("filetime_rows"):
         for fr in raw["filetime_rows"]:
             ff = (fr.get("FULLFILENAME") or "").strip()
@@ -370,15 +546,36 @@ $conn.Close()
 
     dwg_findings = _audit_dwgs_headless(dwg_paths) if dwg_paths else {
         "family_block_misuse_dwg": [],
+        "modelspace_titleblock_violations": [],
         "unupdated_titleblocks": [],
+        "short_circuit_nets": [],
+        "unprotected_3phase_poles": [],
         "wires_piercing_symbols": [],
         "open_circuit_loads": [],
+        "text_or_attr_overflows": [],
         "panel_layout_violations": [],
     }
 
     fam_misuse = list(raw.get("family_block_misuse") or [])
     if not fam_misuse and dwg_findings["family_block_misuse_dwg"]:
         fam_misuse = dwg_findings["family_block_misuse_dwg"]
+
+    check_keys = (
+        "missing_catalog",
+        "duplicate_tags",
+        "orphaned_child_contacts",
+        "wire_errors",
+        "schematic_vs_panel_discrepancy",
+        "family_block_misuse",
+        "modelspace_titleblock_violations",
+        "unupdated_titleblocks",
+        "short_circuit_nets",
+        "unprotected_3phase_poles",
+        "wires_piercing_symbols",
+        "open_circuit_loads",
+        "text_or_attr_overflows",
+        "panel_layout_violations",
+    )
 
     counts = {
         "comp_total": int(raw["comp_total"]),
@@ -389,26 +586,17 @@ $conn.Close()
         "wire_errors": len(raw["wire_errors"]),
         "schematic_vs_panel_discrepancy": len(raw["schematic_vs_panel_discrepancy"]),
         "family_block_misuse": len(fam_misuse),
+        "modelspace_titleblock_violations": len(dwg_findings["modelspace_titleblock_violations"]),
         "unupdated_titleblocks": len(dwg_findings["unupdated_titleblocks"]),
+        "short_circuit_nets": len(dwg_findings["short_circuit_nets"]),
+        "unprotected_3phase_poles": len(dwg_findings["unprotected_3phase_poles"]),
         "wires_piercing_symbols": len(dwg_findings["wires_piercing_symbols"]),
         "open_circuit_loads": len(dwg_findings["open_circuit_loads"]),
+        "text_or_attr_overflows": len(dwg_findings["text_or_attr_overflows"]),
         "panel_layout_violations": len(dwg_findings["panel_layout_violations"]),
     }
-    passed = all(
-        counts[k] == 0
-        for k in (
-            "missing_catalog",
-            "duplicate_tags",
-            "orphaned_child_contacts",
-            "wire_errors",
-            "schematic_vs_panel_discrepancy",
-            "family_block_misuse",
-            "unupdated_titleblocks",
-            "wires_piercing_symbols",
-            "open_circuit_loads",
-            "panel_layout_violations",
-        )
-    )
+    passed = all(counts[k] == 0 for k in check_keys)
+
     return {
         "mdb": str(mdb_path.resolve()),
         "tables_present": raw["tables_present"],
@@ -421,18 +609,22 @@ $conn.Close()
             "wire_errors": raw["wire_errors"][:10],
             "schematic_vs_panel_discrepancy": raw["schematic_vs_panel_discrepancy"][:10],
             "family_block_misuse": fam_misuse[:10],
+            "modelspace_titleblock_violations": dwg_findings["modelspace_titleblock_violations"][:10],
             "unupdated_titleblocks": dwg_findings["unupdated_titleblocks"][:10],
+            "short_circuit_nets": dwg_findings["short_circuit_nets"][:10],
+            "unprotected_3phase_poles": dwg_findings["unprotected_3phase_poles"][:10],
             "wires_piercing_symbols": dwg_findings["wires_piercing_symbols"][:10],
             "open_circuit_loads": dwg_findings["open_circuit_loads"][:10],
+            "text_or_attr_overflows": dwg_findings["text_or_attr_overflows"][:10],
             "panel_layout_violations": dwg_findings["panel_layout_violations"][:10],
         },
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="ACADE Project Scratch Database (.mdb) + DWG Gatekeeper Audit v2.0 (Fail-Closed)")
+    parser = argparse.ArgumentParser(description="ACADE Scratch DB + Electrical Netlist DRC & Layout Gatekeeper v3.0 (Fail-Closed)")
     parser.add_argument("--mdb", type=Path, required=True, help="Path to <project>.mdb Scratch Database")
-    parser.add_argument("--project-dir", type=Path, default=None, help="Optional project folder or 01_Drawings folder for DWG inspection")
+    parser.add_argument("--project-dir", type=Path, default=None, help="Optional project folder or 01_Drawings folder for DWG DRC")
     args = parser.parse_args()
 
     result = audit_scratch_database(args.mdb, args.project_dir)

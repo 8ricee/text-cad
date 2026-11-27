@@ -818,33 +818,30 @@ def build_native_acade_project_manifest(project_dir: Path, project_name: str = "
                 "LINE8": "REV A",
             },
         },
+        "verified_circuits_sheet_04": [
+            {"circuit_type": "BUS_3PH_N_PE", "bus_ys": [272.0, 265.0, 258.0, 251.0, 244.0]},
+            {"circuit_type": "DOL_3P", "origin_x": 85.0, "mpcb_tag": "-Q2", "contactor_tag": "-K1", "motor_tag": "-M1", "inst": "=PLC1", "desc1": "CONVEYOR MOTOR 4.0KW"},
+            {"circuit_type": "VFD_3P", "origin_x": 165.0, "mpcb_tag": "-Q6", "vfd_tag": "-U1", "motor_tag": "-M2", "inst": "=PLC1", "desc1": "SINAMICS G120C 4.0KW"},
+            {"circuit_type": "PSU_24VDC_PELV", "origin_x": 265.0, "mcb_tag": "-Q3", "psu_tag": "-G1", "phase": "L1", "inst": "=MAIN", "desc1": "SITOP 24VDC 10A PELV"},
+        ],
         "schematic_symbols_sheet_05": [
-            {"block_name": "VFU1_S00371", "point": [100.0, 250.0], "attributes": {"TAG1": "-F1", "MFG": "SIEMENS", "CAT": "3NW7031", "LOC": "+MAIN_PNL", "DESC1": "PHASE FUSE 3P 2A"}},
-            {"block_name": "VCB11Q13", "point": [142.0, 250.0], "attributes": {"TAG1": "-Q3", "MFG": "SIEMENS", "CAT": "5SL6210-7", "LOC": "+MAIN_PNL", "DESC1": "MCB 2P 10A PSU"}},
-            {"block_name": "VCB11Q13", "point": [45.0, 240.0], "attributes": {"TAG1": "-Q2", "MFG": "SIEMENS", "CAT": "3RV2021-4AA10", "LOC": "+MAIN_PNL", "DESC1": "MPCB VFD 16A"}},
-            {"block_name": "VCR1", "point": [295.0, 240.0], "attributes": {"TAG1": "-K1", "MFG": "SIEMENS", "CAT": "3RT2026-1BB40", "LOC": "+MAIN_PNL", "DESC1": "CONVEYOR CONTACTOR COIL", "ASSYCODE": "AUX_3RH2911_2NO2NC;DIODE_3RT2926"}},
-            {"block_name": "VCR21", "point": [45.0, 210.0], "attributes": {"TAG2": "-K1", "TERM01": "1", "TERM02": "2", "LOC": "+MAIN_PNL", "DESC1": "CONTACTOR POLE L1"}},
-            {"block_name": "VCR21", "point": [60.0, 210.0], "attributes": {"TAG2": "-K1", "TERM01": "3", "TERM02": "4", "LOC": "+MAIN_PNL", "DESC1": "CONTACTOR POLE L2"}},
-            {"block_name": "VCR21", "point": [75.0, 210.0], "attributes": {"TAG2": "-K1", "TERM01": "5", "TERM02": "6", "LOC": "+MAIN_PNL", "DESC1": "CONTACTOR POLE L3"}},
-            {"block_name": "VMO13", "point": [60.0, 103.0], "attributes": {"TAG1": "-M1", "MFG": "SIEMENS", "CAT": "1LE1001-1BB22", "LOC": "+FIELD", "DESC1": "CONVEYOR MOTOR 4.0KW"}},
-            {"block_name": "ht1001", "point": [235.0, 253.0], "attributes": {"TAGSTRIP": "-X1", "TERM01": "F1", "MFG": "PHOENIX CONTACT", "CAT": "3004100", "LOC": "+MAIN_PNL"}},
-            {"block_name": "VA1_WEIGH_TRANS", "point": [212.0, 125.0], "attributes": {"TAG1": "-A2", "MFG": "SIEMENS", "CAT": "7MH4910-0AA01", "LOC": "+MAIN_PNL", "INST": "=PLC1"}},
-            {"block_name": "ht0001", "point": [182.0, 210.0], "attributes": {"TAGSTRIP": "-X3", "TERM01": "1.L1", "MFG": "PHOENIX CONTACT", "CAT": "3036042", "LOC": "+MAIN_PNL"}},
+            {"block_name": "VFU1", "point": [85.0, 225.0], "poles": 3, "pole_spacing": 10.0, "attributes": {"TAG1": "-F1", "MFG": "SIEMENS", "CAT": "3NW7031", "LOC": "+MAIN_PNL", "DESC1": "PHASE FUSE 3P 2A"}},
+            {"block_name": "VCR1", "point": [185.0, 215.0], "attributes": {"TAG1": "-K1", "MFG": "SIEMENS", "CAT": "3RT2026-1BB40", "LOC": "+MAIN_PNL", "DESC1": "CONVEYOR CONTACTOR COIL", "ASSYCODE": "AUX_3RH2911_2NO2NC;DIODE_3RT2926"}},
+            {"block_name": "VA1_WEIGH_TRANS", "point": [155.0, 120.0], "attributes": {"TAG1": "-A2", "MFG": "SIEMENS", "CAT": "7MH4910-0AA01", "LOC": "+MAIN_PNL", "INST": "=PLC1"}},
+            {"block_name": "ht1001", "point": [185.0, 245.0], "attributes": {"TAGSTRIP": "-X1", "TERM01": "F1", "MFG": "PHOENIX CONTACT", "CAT": "3004100", "LOC": "+MAIN_PNL"}},
         ],
         "wires_and_arrows_sheet_05": {
             "wires": [
-                {"p1": [25.0, 282.0], "p2": [165.0, 282.0], "layer": "PWR_L1_BK_2.5"},
-                {"p1": [25.0, 278.0], "p2": [165.0, 278.0], "layer": "PWR_L2_BK_2.5"},
-                {"p1": [25.0, 274.0], "p2": [165.0, 274.0], "layer": "PWR_L3_BK_2.5"},
-                {"p1": [45.0, 282.0], "p2": [45.0, 118.0], "layer": "PWR_L1_BK_2.5"},
-                {"p1": [60.0, 278.0], "p2": [60.0, 118.0], "layer": "PWR_L2_BK_2.5"},
-                {"p1": [75.0, 274.0], "p2": [75.0, 118.0], "layer": "PWR_L3_BK_2.5"},
-                {"p1": [235.0, 268.0], "p2": [235.0, 220.0], "layer": "CTRL_24VDC_DBU_0.75"},
+                {"p1": [85.0, 265.0], "p2": [85.0, 195.0], "layer": "PWR_L1_BK_2.5"},
+                {"p1": [95.0, 265.0], "p2": [95.0, 195.0], "layer": "PWR_L2_BK_2.5"},
+                {"p1": [105.0, 265.0], "p2": [105.0, 195.0], "layer": "PWR_L3_BK_2.5"},
+                {"p1": [185.0, 260.0], "p2": [185.0, 200.0], "layer": "CTRL_24VDC_DBU_0.75"},
+                {"p1": [185.0, 200.0], "p2": [185.0, 185.0], "layer": "CTRL_0VDC_WHBU_0.75"},
             ],
-            "dots": [[45.0, 282.0], [60.0, 278.0], [75.0, 274.0]],
+            "dots": [],
             "arrows": [
-                {"kind": "source", "point": [165.0, 282.0], "sigcode": "BUS_L1_400VAC", "wireno": "L1"},
-                {"kind": "destination", "point": [25.0, 282.0], "sigcode": "BUS_L1_400VAC", "wireno": "L1"},
+                {"kind": "destination", "point": [185.0, 260.0], "sigcode": "BUS_24VDC_PELV", "wireno": "+24VDC"},
+                {"kind": "destination", "point": [185.0, 185.0], "sigcode": "BUS_0VDC_PELV", "wireno": "0VDC"},
             ],
         },
         "plc_io_csv": str(Path(__file__).resolve().parent.parent / "templates" / "plc_io_import_template.csv"),
@@ -863,6 +860,12 @@ def execute_native_manifest(manifest: dict, mdb_path: Path | None = None) -> dic
 
     proj_dir = Path(manifest["project_init"]["project_dir"])
     init_res = mcp.tool_acade_project_init(manifest["project_init"])
+
+    # Sheet 04: Open 04_power_distribution.dwg -> Build verified 3-phase DOL, VFD, and Grounded PELV 24VDC circuits
+    if manifest.get("verified_circuits_sheet_04"):
+        mcp.tool_autocad_open_or_new({"path": str(proj_dir / "04_power_distribution.dwg")})
+        for cir in manifest["verified_circuits_sheet_04"]:
+            mcp.tool_acade_insert_verified_circuit(cir)
 
     # Sheet 05: Open 05_control_schematic.dwg -> Draw smart wires FIRST -> Insert symbols ON wires SECOND (auto-break)
     mcp.tool_autocad_open_or_new({"path": str(proj_dir / "05_control_schematic.dwg")})
