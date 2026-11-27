@@ -41,13 +41,13 @@ Skill chuyên sâu cho **Thiết kế Cơ khí Tham số**, **Kim loại tấm (
 
 ---
 
-## 2. MCP Server `inventor-direct` (`Inventor.Application` COM)
-- Server: `C:\Users\Gaadz\.gemini\config\mcp_servers\inventor_mcp_server.py` (`v1.1.0`)
+## 2. MCP Server `inventor-direct` (In-Process `.NET 10` Add-in via Named Pipe)
+- Server: `C:\Users\Gaadz\.gemini\config\mcp_servers\inventor_mcp_server.py` (`v2.0.0`) → Named Pipe `\\.\pipe\agy-inventor-direct` → `Agy.InventorBridge.dll` (chạy trực tiếp bên trong `Inventor.exe`, không qua PowerShell COM).
 - Đủ **6 tools**:
-  1. `inventor_status`: Kiểm tra tiến trình Inventor, tài liệu đang mở, `.ipj` hiện hành.
+  1. `inventor_status`: Kiểm tra tiến trình Inventor 2027, tài liệu đang mở, `.ipj` hiện hành qua Named Pipe.
   2. `inventor_create_or_open`: Tạo mới `.ipt` (Standard / Sheet Metal), `.iam`, `.idw` từ Template hệ mét `mm` hoặc mở/kích hoạt `.ipj`/file có sẵn.
-  3. `inventor_run_script`: Chạy script PowerShell COM (`$inv`, `$doc` gắn sẵn) để dựng `UserParameters`, `PlanarSketch` ràng buộc kín, `Extrude`, `SheetMetalFeatures.FlangeFeatures`, `CornerRelief`, `AssemblyConstraints` hoặc hình chiếu `.idw`.
+  3. `inventor_run_script`: Chạy rule **iLogic / VB.NET** trực tiếp in-process (`ThisApplication`, `ThisDoc.Document` gắn sẵn) bọc trong **`Inventor.Transaction` nguyên tử** (tự động `txn.Abort()` rollback toàn bộ nếu có bất kỳ lỗi nào).
   4. `inventor_check_constraints_and_interference`: Kiểm tra 100% Sketch đạt `kFullyConstrainedConstraintStatus`, kiểm tra `Grounded` & bậc tự do `DOF = 0`, và chạy `AnalyzeInterference()`.
-  5. `inventor_update_parameters`: Cập nhật `UserParameters`/`ModelParameters`, `Update2($true)` và `Save()`.
+  5. `inventor_update_parameters`: Cập nhật `UserParameters`/`ModelParameters` nguyên tử trong `Transaction`, `Update2(True)` và `Save()`.
   6. `inventor_export_flat_pattern_dxf`: Xuất `FlatPattern` `.dxf` tách rõ `OUTER_PROFILE`, `INNER_CUTS`, `BEND_UP` (Continuous `37633`), `BEND_DOWN` (Dashed `37634`).
-- Mẫu code PowerShell COM chuẩn (`MasterSkeleton`, `SheetMetal`, `Assembly`, `.idw`): xem [references/inventor-com-recipes.md](references/inventor-com-recipes.md).
+- Mẫu code iLogic VB.NET chuẩn (`MasterSkeleton`, `SheetMetal`, `Assembly`, `.idw`): xem [references/inventor-com-recipes.md](references/inventor-com-recipes.md).

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ApplicationPackage
+  SchemaVersion="1.0"
+  AppVersion="1.0.0"
+  Author="Gaadz / Antigravity"
+  ProductCode="{7B8A6E4D-4F21-4E93-9B2F-1C6A9E7D2A10}"
+  UpgradeCode="{A19C3B5E-8D42-4C17-8A0E-3F7B2D9C4E11}"
+  Name="Agy AutoCAD Direct Bridge">
+  <CompanyDetails Name="Gaadz Engineering" Url="https://github.com/8ricee/text-cad" />
+  <RuntimeRequirements Platform="AutoCAD|ACADE|ACADLT|Civil3D|Map|ACADM|MEP" SeriesMin="R26.0" SeriesMax="R26.0" OS="Win64" />
+  <Components Description="In-process .NET 10 Named Pipe Bridge for AutoCAD 2027">
+    <RuntimeRequirements Platform="AutoCAD|ACADE|ACADLT|Civil3D|Map|ACADM|MEP" SeriesMin="R26.0" SeriesMax="R26.0" OS="Win64" />
+    <ComponentEntry AppName="AgyAutoCadBridge" ModuleName="./Contents/Agy.AutoCadBridge.dll" LoadOnAutoCADStartup="True" />
+  </Components>
+</ApplicationPackage>

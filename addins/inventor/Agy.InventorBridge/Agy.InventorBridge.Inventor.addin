@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Addin Type="Standard">
+  <ClassId>{9D4C2B7E-61F3-4A88-BC52-8E17D3A94C22}</ClassId>
+  <ClientId>{9D4C2B7E-61F3-4A88-BC52-8E17D3A94C22}</ClientId>
+  <DisplayName Language="1033">Agy Inventor Direct Bridge</DisplayName>
+  <Description Language="1033">In-process .NET 10 Named Pipe Bridge with Atomic Transactions for Inventor 2027</Description>
+  <Assembly>C:\Users\Gaadz\AppData\Roaming\Autodesk\Inventor 2027\Addins\AgyInventorBridge\Agy.InventorBridge.dll</Assembly>
+  <LoadOnStartUp>1</LoadOnStartUp>
+  <LoadBehavior>0</LoadBehavior>
+  <UserUnloadable>1</UserUnloadable>
+  <Hidden>0</Hidden>
+  <SupportedSoftwareVersionGreaterThan>28..</SupportedSoftwareVersionGreaterThan>
+  <DataVersion>1</DataVersion>
+  <UserInterfaceVersion>1</UserInterfaceVersion>
+</Addin>
