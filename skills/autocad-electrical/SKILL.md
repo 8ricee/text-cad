@@ -160,7 +160,7 @@ Khi thực hiện thiết kế, tính toán hoặc kiểm tra từng loại tủ
      - **Máng cáp nhựa (`Wire Duct`) ghép chữ T sát mép (`Butt-Joint`):** Máng ngang cắt dừng ở mép trong máng dọc.
    - **Liên kết Cơ–Điện 3D (`Autodesk Inventor Electromechanical Link` - `.emx`):** Khi dự án kết nối Inventor, khởi tạo file `.emx` thật bằng lệnh **`AEEMLINK`** của ACADE nối `.wdp` ↔ `.iam` (`RefDes ↔ TAG`, `Harness Pin ↔ TERMxx`). **Cấm tuyệt đối tự chế thẻ XML `.emx` giả lập bằng Python `ElementTree`.**
    - **Giới hạn đúng vai trò của `ezdxf` ([scripts/generate_busbar_dxf.py](scripts/generate_busbar_dxf.py)):** Chỉ dùng `ezdxf` cho **bản vẽ gia công cơ khí thanh cái 2D CAM (`08_busbar_fabrication`)** (tính `Bend Allowance` + lỗ `DIN 43673`), **tuyệt đối không bao giờ dùng `ezdxf` để dựng Sơ đồ nguyên lý (`01..06`, `09`) hay gõ cứng bảng `BOM` / `Wire List` / `Cross-Ref`.**
-3. **Tự động hóa Native ACADE qua MCP `autocad-direct` (`c:wd_*` AutoLISP API), Chống lỗi Font `?` Tiếng Việt & Xuất PDF**:
+3. **Tự động hóa Native ACADE qua MCP `autocad-direct` (`v3.0.0` — Named Pipe → In-Process `.NET 10` Add-in `Agy.AutoCadBridge` + `c:wd_*` AutoLISP API), Chống lỗi Font `?` Tiếng Việt & Xuất PDF**:
    - **Khởi tạo & Dựng mạch 100% Native Database (`.wdp` + `.dwg` + Scratch `.mdb`):**
      - Mọi bản vẽ điện quản lý bằng định dạng **`.dwg`** nằm trong file dự án **`.wdp`** (copy từ [templates/TEMPLATE_IEC_A3.dwt](templates/TEMPLATE_IEC_A3.dwt) đã nhúng sẵn `WD_M` và `TITLE_BLOCK_A3_BILINGUAL`).
      - Sử dụng trực tiếp bộ tool chuyên biệt của MCP **`autocad-direct`** gọi thẳng AutoLISP API gốc của AutoCAD Electrical (nạp qua `wdload.lsp` → `(c:wd_load)`):
@@ -206,4 +206,4 @@ Khi thực hiện thiết kế, tính toán hoặc kiểm tra từng loại tủ
    - Kiểm toán điện trực tiếp trên Project Scratch Database `<project>.mdb` (`Database Gatekeeper`): [scripts/acade_electrical_audit.py](scripts/acade_electrical_audit.py)
    - Đồng bộ 2 chiều ACADE ↔ TIA Portal PLC Tags & xuất `AutomationML (.aml)`: [scripts/sync_tia_tags.py](scripts/sync_tia_tags.py)
    - Tự động sinh bản vẽ gia công cơ khí Busbar 2D CAM DXF (`1:1`, lỗ `DIN 43673`, `--from-csv`): [scripts/generate_busbar_dxf.py](scripts/generate_busbar_dxf.py)
-   - Orchestrator khởi tạo dự án `.wdp`/`.dwg` thực trên AutoCAD Electrical 2027 qua COM/`c:wd_*` + kiểm tra va chạm 3D tủ điện: [scripts/build_project_drawings.py](scripts/build_project_drawings.py) & MCP **`autocad-direct`** (`C:\Users\Gaadz\.gemini\config\mcp_servers\autocad_mcp_server.py`)
+   - Orchestrator khởi tạo dự án `.wdp`/`.dwg` thực trên AutoCAD Electrical 2027 qua Named Pipe In-Process `.NET 10` Add-in (`Agy.AutoCadBridge` + `c:wd_*`, hỗ trợ `Transaction` / `UndoMark` rollback nguyên tử) + kiểm tra va chạm 3D tủ điện: [scripts/build_project_drawings.py](scripts/build_project_drawings.py) & MCP **`autocad-direct`** (`C:\Users\Gaadz\.gemini\config\mcp_servers\autocad_mcp_server.py`)

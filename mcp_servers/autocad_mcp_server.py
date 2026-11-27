@@ -1,27 +1,34 @@
-"""Global Zero-Dependency Stdio MCP Server for Direct Autodesk AutoCAD COM Automation.
+"""Global Zero-Dependency Stdio MCP Server for Direct Autodesk AutoCAD .NET Add-in Automation via Named Pipe.
 
-Runs in the user's Windows Desktop session when spawned by Antigravity Language Server via mcp_config.json:
+Runs in the user's Windows Desktop session when spawned by Antigravity Language Server via mcp_config.json.
+Communicates exclusively over Named Pipe (\\\\.\\pipe\\agy-autocad-direct) with Agy.AutoCadBridge (.NET 10 in-process Add-in):
 - autocad_status: Inspect running AutoCAD, open documents, active layout, DBMOD, and $INSUNITS.
-- autocad_open_or_new: Open a .dwg/.dxf or create a new 1:1 mm drawing with ISO linetypes, VN_ARIAL, and ISO_MM DimStyle.
+- autocad_open_or_new: Open a .dwg/.dxf or create a new 1:1 mm drawing with VN_ARIAL inside a Transaction.
 - autocad_draw_entities: Draw line, circle, arc, lwpolyline, text, mtext, hatch, insert_block (with Attributes),
-  mleader, table, dim_aligned, dim_linear, dim_diameter directly into ModelSpace or PaperSpace via COM + auto-save.
-- autocad_run_command: Send AutoCAD commands / AutoLISP directly to ActiveDocument.SendCommand() + auto-save.
+  table, dim_aligned, dim_linear, dim_diameter directly into ModelSpace or PaperSpace inside an atomic .NET Transaction.
+- autocad_run_command: Send AutoCAD commands or AutoLISP directly in-process + auto-save.
 - autocad_reload_file: Reload a .dwg/.dxf tab safely (protects unsaved manual edits when DBMOD != 0).
-- autocad_audit_and_inspect: Audit active document via COM for hardcoded Dim TextOverride, bounding-box overlaps,
+- autocad_audit_and_inspect: Audit active document in-process for hardcoded Dim TextOverride, bounding-box overlaps,
   out-of-frame Paper Space entities, CMDACTIVE, and LASTPROMPT.
 """
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
-SERVER_INFO = {"name": "autocad-direct", "version": "2.0.0"}
+from pipe_client import launch_on_desktop, pipe_available, pipe_call
+
+SERVER_INFO = {"name": "autocad-direct", "version": "3.0.0"}
 PROTOCOL_VERSION = "2024-11-05"
+PIPE_NAME = "agy-autocad-direct"
 
 SKILL_ROOT = Path(r"C:\Users\Gaadz\.gemini\config\skills\autocad-electrical")
 TEMPLATE_DWT = SKILL_ROOT / "templates" / "TEMPLATE_IEC_A3.dwt"
@@ -142,175 +149,173 @@ def _lisp_fail_loud_guard(req_fns: list[str], err_file: str) -> str:
     )
 
 
-def _run_acade_lisp_checked(lisp_body: str, req_fns: list[str], auto_save: bool = True, timeout_sec: float = 25.0) -> dict[str, Any]:
-    """Send ACADE AutoLISP via COM, wait for sentinel file (preventing SendCommand async race), and Fail-Loud if unbound."""
-    import tempfile
-    import time
+def _ensure_acad_pipe(initial_dwg: Path | None = None, launch_timeout: float = 65.0) -> None:
+    """Return once Agy.AutoCadBridge Named Pipe is ready, launching ACADE 2027 on WinSta0\\Default if closed."""
+    if pipe_available(PIPE_NAME, wait_ms=200):
+        return
 
+    acad_exe = Path(r"C:\Program Files\Autodesk\AutoCAD 2027\acad.exe")
+    if not acad_exe.exists():
+        raise FileNotFoundError(f"AutoCAD 2027 executable not found: {acad_exe}")
+
+    cmd_str = f'"{acad_exe}" /product ACADE /language "en-US" /nologo'
+    if initial_dwg and initial_dwg.exists():
+        cmd_str += f' "{initial_dwg}"'
+    elif TEMPLATE_DWT.exists():
+        cmd_str += f' /t "{TEMPLATE_DWT}"'
+
+    cwd_dir = str(initial_dwg.parent) if (initial_dwg and initial_dwg.exists()) else str(acad_exe.parent)
+    launch_on_desktop(cmd_str, cwd_dir)
+
+    deadline = time.monotonic() + launch_timeout
+    while time.monotonic() < deadline:
+        if pipe_available(PIPE_NAME, wait_ms=500):
+            return
+        time.sleep(0.5)
+    raise TimeoutError(f"AutoCAD 2027 Named Pipe '{PIPE_NAME}' not ready after {launch_timeout}s.")
+
+
+def _eval_in_acad_lisp(lisp_expr: str, timeout_sec: float = 35.0, initial_dwg: Path | None = None) -> str:
+    """Execute an AutoLISP expression in-process inside AutoCAD via Agy.AutoCadBridge Named Pipe."""
+    _ensure_acad_pipe(initial_dwg=initial_dwg)
+    res = pipe_call(
+        PIPE_NAME,
+        "eval_lisp",
+        {"expr": lisp_expr, "timeout_ms": int(timeout_sec * 1000)},
+        timeout_s=timeout_sec + 5.0,
+    )
+    return str((res or {}).get("value", ""))
+
+
+def _run_acade_lisp_checked(lisp_body: str, req_fns: list[str], auto_save: bool = True, timeout_sec: float = 35.0) -> dict[str, Any]:
+    """Execute ACADE AutoLISP in-process via Named Pipe RPC with atomic UndoMark rollback on error."""
     tmp_dir = Path(tempfile.gettempdir())
     err_path = tmp_dir / "acade_mcp_err.txt"
-    done_path = tmp_dir / "acade_mcp_done.txt"
     err_path.unlink(missing_ok=True)
-    done_path.unlink(missing_ok=True)
 
     guard = _lisp_fail_loud_guard(req_fns, str(err_path))
-    # Always switch to Model Space (TILEMODE=1) during c:wd_insym2 / c:wd_wire_quik schematic editing,
-    # then restore Paper Space Layout ISO_A3 (TILEMODE=0) cleanly before saving!
     pre_ms = '(setq _had_iso (member "ISO_A3" (layoutlist))) (if (= (getvar "TILEMODE") 0) (setvar "TILEMODE" 1)) '
     post_ps = ' (if _had_iso (progn (setvar "TILEMODE" 0) (setvar "CTAB" "ISO_A3"))) '
-    sentinel = (
-        f'(setq _df (open {_lisp_str(str(done_path))} "w")) '
-        f'(write-line "DONE" _df) (close _df)'
+    save_s = _lisp_autosave_snippet().strip() if auto_save else ""
+    undo_wrapped = (
+        '(setq _agy_udoc (vla-get-ActiveDocument (vlax-get-acad-object))) '
+        '(vla-StartUndoMark _agy_udoc) '
+        f'(setq _agy_inner (vl-catch-all-apply (function (lambda () {pre_ms} {lisp_body} {post_ps})))) '
+        '(vla-EndUndoMark _agy_udoc) '
+        '(if (vl-catch-all-error-p _agy_inner) '
+        '(progn (vl-cmdf "_.U") (exit))) '
+        f'{save_s}'
     )
-    full_cmd = f"(progn {_lisp_acade_load()} {guard} (if (not _missing) (progn {pre_ms} {lisp_body} {post_ps})) {sentinel})\n"
-    res = tool_autocad_run_command({"command": full_cmd, "auto_save": auto_save})
-
-    deadline = time.monotonic() + timeout_sec
-    while time.monotonic() < deadline:
-        if done_path.exists():
-            break
-        time.sleep(0.15)
-    if not done_path.exists():
-        raise TimeoutError(f"AutoCAD SendCommand did not complete within {timeout_sec}s (possible modal dialog).")
-    done_path.unlink(missing_ok=True)
+    full_expr = f'(progn {_lisp_acade_load()} {guard} (if (not _missing) (progn {undo_wrapped})) (getvar "DWGNAME"))'
+    dwg_name = _eval_in_acad_lisp(full_expr, timeout_sec=timeout_sec)
 
     if err_path.exists():
         msg = err_path.read_text(encoding="utf-8", errors="replace").strip()
         err_path.unlink(missing_ok=True)
         raise RuntimeError(f"ACADE Fail-Loud: {msg}")
-    return res
+    return {"sent": True, "auto_save": auto_save, "document": dwg_name, "atomic": True}
 
 
 def _lisp_str(val: str) -> str:
     return '"' + str(val).replace("\\", "/").replace('"', '\\"') + '"'
 
 
-def _run_ps(script: str, timeout: int = 30) -> dict[str, Any]:
-    """Execute a PowerShell snippet and parse its JSON stdout."""
-    proc = subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-    )
-    if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "PowerShell error").strip()
-        raise RuntimeError(err)
-    out = (proc.stdout or "").strip()
-    if not out:
-        return {"ok": True}
+def _odbc_query_mdb(mdb_path: Path, sql: str) -> list[list[str]]:
+    """Query an Access .mdb file directly in-process via Win32 odbc32.dll (zero PowerShell / third-party deps)."""
+    odbc = ctypes.WinDLL("odbc32")
+    SQL_HANDLE_ENV, SQL_HANDLE_DBC, SQL_HANDLE_STMT = 1, 2, 3
+    SQL_ATTR_ODBC_VERSION, SQL_OV_ODBC3 = 200, 3
+    SQL_C_WCHAR, SQL_NULL_DATA, SQL_NO_DATA = -8, -1, 100
+
+    odbc.SQLAllocHandle.argtypes = [ctypes.c_short, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    odbc.SQLAllocHandle.restype = ctypes.c_short
+    odbc.SQLSetEnvAttr.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+    odbc.SQLSetEnvAttr.restype = ctypes.c_short
+    odbc.SQLDriverConnectW.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_short,
+        ctypes.c_wchar_p, ctypes.c_short, ctypes.POINTER(ctypes.c_short), ctypes.c_ushort,
+    ]
+    odbc.SQLDriverConnectW.restype = ctypes.c_short
+    odbc.SQLExecDirectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+    odbc.SQLExecDirectW.restype = ctypes.c_short
+    odbc.SQLNumResultCols.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_short)]
+    odbc.SQLNumResultCols.restype = ctypes.c_short
+    odbc.SQLFetch.argtypes = [ctypes.c_void_p]
+    odbc.SQLFetch.restype = ctypes.c_short
+    odbc.SQLGetData.argtypes = [
+        ctypes.c_void_p, ctypes.c_ushort, ctypes.c_short,
+        ctypes.c_void_p, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64),
+    ]
+    odbc.SQLGetData.restype = ctypes.c_short
+    odbc.SQLDisconnect.argtypes = [ctypes.c_void_p]
+    odbc.SQLFreeHandle.argtypes = [ctypes.c_short, ctypes.c_void_p]
+
+    def _ok(rc: int) -> bool:
+        return rc in (0, 1)
+
+    henv = ctypes.c_void_p()
+    hdbc = ctypes.c_void_p()
+    hstmt = ctypes.c_void_p()
+    if not _ok(odbc.SQLAllocHandle(SQL_HANDLE_ENV, None, ctypes.byref(henv))):
+        raise RuntimeError("ODBC SQLAllocHandle(ENV) failed.")
     try:
-        return json.loads(out)
-    except json.JSONDecodeError:
-        return {"ok": True, "raw": out}
-
-
-def _ps_quote(s: str) -> str:
-    return "'" + s.replace("'", "''") + "'"
-
-
-def _ps_init_doc_standards() -> str:
-    return r"""
-function Init-CadStandards($doc) {
-    $doc.SetVariable('INSUNITS', 4)
-    $doc.SetVariable('MEASUREMENT', 1)
-    try { $doc.SetVariable('PSLTSCALE', 1) } catch {}
-    try { $doc.SetVariable('MSLTSCALE', 1) } catch {}
-    foreach ($lt in @('CENTER', 'DASHED', 'DASHDOT', 'HIDDEN')) {
-        try { $null = $doc.Linetypes.Item($lt) } catch {
-            try { $doc.Linetypes.Load($lt, 'acadiso.lin') } catch {
-                try { $doc.Linetypes.Load($lt, 'acad.lin') } catch {}
-            }
-        }
-    }
-    try { $st = $doc.TextStyles.Item('VN_ARIAL') } catch { $st = $doc.TextStyles.Add('VN_ARIAL') }
-    try { $st.SetFont('Arial', $false, $false, 0, 34) } catch {}
-    try { $st.Width = 0.82 } catch {}
-    try { $doc.ActiveTextStyle = $st } catch {}
-    try {
-        $ds = $doc.DimStyles.Item('ISO_MM')
-    } catch {
-        $ds = $doc.DimStyles.Add('ISO_MM')
-    }
-    try {
-        foreach ($kv in @(
-            @('DIMTXSTY', 'VN_ARIAL'),
-            @('DIMTXT', 2.5),
-            @('DIMASZ', 2.5),
-            @('DIMEXO', 1.0),
-            @('DIMEXE', 1.25),
-            @('DIMGAP', 0.8),
-            @('DIMTAD', 1),
-            @('DIMTIH', 0),
-            @('DIMTOH', 0),
-            @('DIMDEC', 1),
-            @('DIMZIN', 8),
-            @('DIMDSEP', 46),
-            @('DIMLFAC', 1.0)
-        )) {
-            try { $doc.SetVariable($kv[0], $kv[1]) } catch {}
-        }
-        $ds.CopyFrom($doc)
-        $doc.ActiveDimStyle = $ds
-    } catch {}
-}
-"""
+        odbc.SQLSetEnvAttr(henv, SQL_ATTR_ODBC_VERSION, ctypes.c_void_p(SQL_OV_ODBC3), 0)
+        if not _ok(odbc.SQLAllocHandle(SQL_HANDLE_DBC, henv, ctypes.byref(hdbc))):
+            raise RuntimeError("ODBC SQLAllocHandle(DBC) failed.")
+        conn_str = f"Driver={{Microsoft Access Driver (*.mdb, *.accdb)}};Dbq={mdb_path};ReadOnly=1;"
+        out_len = ctypes.c_short(0)
+        if not _ok(odbc.SQLDriverConnectW(hdbc, None, conn_str, -3, None, 0, ctypes.byref(out_len), 0)):
+            raise RuntimeError(f"ODBC failed to connect to {mdb_path}")
+        try:
+            if not _ok(odbc.SQLAllocHandle(SQL_HANDLE_STMT, hdbc, ctypes.byref(hstmt))):
+                raise RuntimeError("ODBC SQLAllocHandle(STMT) failed.")
+            try:
+                if not _ok(odbc.SQLExecDirectW(hstmt, sql, -3)):
+                    raise RuntimeError(f"ODBC query failed: {sql}")
+                ncols = ctypes.c_short(0)
+                odbc.SQLNumResultCols(hstmt, ctypes.byref(ncols))
+                rows: list[list[str]] = []
+                buf = ctypes.create_unicode_buffer(4096)
+                ind = ctypes.c_int64(0)
+                while True:
+                    rc = odbc.SQLFetch(hstmt)
+                    if rc == SQL_NO_DATA or not _ok(rc):
+                        break
+                    row: list[str] = []
+                    for c in range(1, ncols.value + 1):
+                        ind.value = 0
+                        grc = odbc.SQLGetData(hstmt, c, SQL_C_WCHAR, buf, ctypes.sizeof(buf), ctypes.byref(ind))
+                        if not _ok(grc) or ind.value == SQL_NULL_DATA:
+                            row.append("")
+                        else:
+                            row.append(buf.value)
+                    rows.append(row)
+                return rows
+            finally:
+                odbc.SQLFreeHandle(SQL_HANDLE_STMT, hstmt)
+        finally:
+            odbc.SQLDisconnect(hdbc)
+            odbc.SQLFreeHandle(SQL_HANDLE_DBC, hdbc)
+    finally:
+        odbc.SQLFreeHandle(SQL_HANDLE_ENV, henv)
 
 
 def tool_autocad_status(_args: dict[str, Any]) -> dict[str, Any]:
-    ps = r"""
-$ErrorActionPreference = 'Stop'
-$acad = [Runtime.InteropServices.Marshal]::GetActiveObject('AutoCAD.Application')
-$docs = @()
-foreach ($d in $acad.Documents) {
-    $docs += @{ name = $d.Name; fullName = $d.FullName; saved = $d.Saved; dbmod = $d.GetVariable('DBMOD') }
-}
-$active = $null
-if ($acad.Documents.Count -gt 0) {
-    $ad = $acad.ActiveDocument
-    $active = @{
-        name = $ad.Name
-        fullName = $ad.FullName
-        activeSpace = [int]$ad.ActiveSpace
-        activeLayout = $ad.ActiveLayout.Name
-        insunits = $ad.GetVariable('INSUNITS')
-        tilemode = $ad.GetVariable('TILEMODE')
-        dbmod = $ad.GetVariable('DBMOD')
-        cmdactive = $ad.GetVariable('CMDACTIVE')
-    }
-}
-@{ caption = $acad.Caption; docCount = $acad.Documents.Count; activeDocument = $active; documents = $docs } | ConvertTo-Json -Depth 5 -Compress
-"""
-    return _run_ps(ps)
+    if not pipe_available(PIPE_NAME, wait_ms=200):
+        return {"running": False, "transport": "named-pipe-inproc-dotnet10", "docCount": 0, "activeDocument": None, "documents": []}
+    return pipe_call(PIPE_NAME, "status", {}, timeout_s=15.0)
 
 
 def tool_autocad_open_or_new(args: dict[str, Any]) -> dict[str, Any]:
     path = (args.get("path") or "").strip()
-    init_fn = _ps_init_doc_standards()
-    if path:
-        p_q = _ps_quote(str(Path(path).resolve()))
-        ps = f"""
-$ErrorActionPreference = 'Stop'
-{init_fn}
-$acad = [Runtime.InteropServices.Marshal]::GetActiveObject('AutoCAD.Application')
-$doc = $acad.Documents.Open({p_q})
-$doc.Activate()
-Init-CadStandards $doc
-@{{ opened = $doc.FullName; activeLayout = $doc.ActiveLayout.Name; insunits = $doc.GetVariable('INSUNITS') }} | ConvertTo-Json -Compress
-"""
-    else:
-        ps = f"""
-$ErrorActionPreference = 'Stop'
-{init_fn}
-$acad = [Runtime.InteropServices.Marshal]::GetActiveObject('AutoCAD.Application')
-$doc = $acad.Documents.Add()
-Init-CadStandards $doc
-$doc.Activate()
-@{{ created = $doc.Name; insunits = $doc.GetVariable('INSUNITS') }} | ConvertTo-Json -Compress
-"""
-    return _run_ps(ps)
+    target = Path(path).resolve() if path else None
+    _ensure_acad_pipe(initial_dwg=target if (target and target.exists()) else None)
+    return pipe_call(
+        PIPE_NAME,
+        "open_or_new",
+        {"path": str(target) if target else "", "template_dwt": str(TEMPLATE_DWT.resolve())},
+        timeout_s=35.0,
+    )
 
 
 def _lisp_autosave_snippet() -> str:
@@ -326,306 +331,42 @@ def _lisp_autosave_snippet() -> str:
 
 
 def tool_autocad_run_command(args: dict[str, Any]) -> dict[str, Any]:
-    command = args.get("command", "")
+    command = args.get("command", "").strip()
     auto_save = bool(args.get("auto_save", True))
     if not command:
         raise ValueError("'command' is required")
-    if not command.endswith("\n") and not command.endswith(" "):
-        command += "\n"
-    if auto_save:
-        command += _lisp_autosave_snippet()
-    cmd_q = _ps_quote(command)
-    ps = f"""
-$ErrorActionPreference = 'Stop'
-$acad = [Runtime.InteropServices.Marshal]::GetActiveObject('AutoCAD.Application')
-if ($acad.Documents.Count -eq 0) {{ throw 'No open AutoCAD document. Call autocad_open_or_new first.' }}
-$doc = $acad.ActiveDocument
-$doc.SendCommand({cmd_q})
-@{{ sent = $true; auto_save = {'$true' if auto_save else '$false'}; document = $doc.Name }} | ConvertTo-Json -Compress
-"""
-    return _run_ps(ps)
+    _ensure_acad_pipe()
+    save_s = _lisp_autosave_snippet().strip() if auto_save else ""
+    if command.startswith("("):
+        dname = _eval_in_acad_lisp(f'(progn {command} {save_s} (getvar "DWGNAME"))', timeout_sec=35.0)
+        return {"sent": True, "auto_save": auto_save, "document": dname}
+    res = pipe_call(PIPE_NAME, "send_command", {"command": command + ("\n" + save_s if save_s else "\n")}, timeout_s=20.0)
+    res["auto_save"] = auto_save
+    return res
 
 
 def tool_autocad_reload_file(args: dict[str, Any]) -> dict[str, Any]:
-    target = str(Path(args["target_path"]).resolve())
-    source = args.get("source_path")
-    force = bool(args.get("force", False))
-    source_resolved = str(Path(source).resolve()) if source else ""
-    t_q = _ps_quote(target)
-    s_q = _ps_quote(source_resolved)
-    ps = f"""
-$ErrorActionPreference = 'Stop'
-$acad = [Runtime.InteropServices.Marshal]::GetActiveObject('AutoCAD.Application')
-$target = {t_q}
-$source = {s_q}
-$force = {'$true' if force else '$false'}
-$backupPath = $null
-$tmp = $null
-foreach ($d in @($acad.Documents)) {{
-    if ([string]::Equals($d.FullName, $target, [System.StringComparison]::OrdinalIgnoreCase)) {{
-        $dbmod = [int]$d.GetVariable('DBMOD')
-        if (($dbmod -ne 0) -and (-not $force)) {{
-            $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
-            $dir = Join-Path (Split-Path $target -Parent) '_backup_unsaved'
-            New-Item -ItemType Directory -Force -Path $dir | Out-Null
-            $backupPath = Join-Path $dir ((Split-Path $target -LeafBase) + "_unsaved_" + $ts + [System.IO.Path]::GetExtension($target))
-            $d.SaveAs($backupPath)
-        }}
-        if ($acad.Documents.Count -le 1) {{ $tmp = $acad.Documents.Add() }}
-        $d.Close($false)
-    }}
-}}
-if ($source -and (Test-Path $source)) {{
-    Move-Item -Force -Path $source -Destination $target
-}}
-$newDoc = $acad.Documents.Open($target)
-$newDoc.Activate()
-if ($tmp) {{ try {{ $tmp.Close($false) }} catch {{}} }}
-@{{ reloaded = $newDoc.FullName; activeLayout = $newDoc.ActiveLayout.Name; backupCreated = $backupPath }} | ConvertTo-Json -Compress
-"""
-    return _run_ps(ps, timeout=45)
+    _ensure_acad_pipe()
+    return pipe_call(
+        PIPE_NAME,
+        "reload_file",
+        {
+            "target_path": str(Path(args["target_path"]).resolve()),
+            "source_path": str(Path(args["source_path"]).resolve()) if args.get("source_path") else "",
+            "force": bool(args.get("force", False)),
+        },
+        timeout_s=45.0,
+    )
 
 
 def tool_autocad_draw_entities(args: dict[str, Any]) -> dict[str, Any]:
-    entities = args.get("entities", [])
-    space = args.get("space", "ModelSpace")
-    zoom = bool(args.get("zoom_extents", True))
-    auto_save = bool(args.get("auto_save", True))
-    payload_json = json.dumps({"entities": entities, "space": space, "zoom": zoom, "auto_save": auto_save})
-    p_q = _ps_quote(payload_json)
-    init_fn = _ps_init_doc_standards()
-    ps = f"""
-$ErrorActionPreference = 'Stop'
-{init_fn}
-$payload = ConvertFrom-Json {p_q}
-$acad = [Runtime.InteropServices.Marshal]::GetActiveObject('AutoCAD.Application')
-if ($acad.Documents.Count -eq 0) {{
-    $doc = $acad.Documents.Add()
-    Init-CadStandards $doc
-}} else {{
-    $doc = $acad.ActiveDocument
-}}
-$targetSpace = if ($payload.space -eq 'PaperSpace') {{ $doc.PaperSpace }} else {{ $doc.ModelSpace }}
-
-function Ensure-Layer($doc, $name, $color, $linetype, $lineweight) {{
-    if (-not $name) {{ return }}
-    try {{ $lyr = $doc.Layers.Item($name) }} catch {{
-        $lyr = $doc.Layers.Add($name)
-    }}
-    if ($null -ne $color) {{ $lyr.color = [int]$color }}
-    if ($linetype) {{ try {{ $lyr.Linetype = [string]$linetype }} catch {{}} }}
-    if ($null -ne $lineweight) {{ try {{ $lyr.Lineweight = [int]$lineweight }} catch {{}} }}
-}}
-
-function Pt3($p) {{
-    $z = if ($p.Count -ge 3) {{ [double]$p[2] }} else {{ 0.0 }}
-    return [double[]]@([double]$p[0], [double]$p[1], $z)
-}}
-
-$count = 0
-foreach ($e in $payload.entities) {{
-    if ($e.layer) {{ Ensure-Layer $doc $e.layer $e.color $e.linetype $e.lineweight }}
-    $ent = $null
-    switch ($e.type) {{
-        'line' {{
-            $ent = $targetSpace.AddLine((Pt3 $e.p1), (Pt3 $e.p2))
-        }}
-        'circle' {{
-            $ent = $targetSpace.AddCircle((Pt3 $e.center), [double]$e.radius)
-        }}
-        'arc' {{
-            $ent = $targetSpace.AddArc((Pt3 $e.center), [double]$e.radius, [double]$e.start_angle_rad, [double]$e.end_angle_rad)
-        }}
-        'lwpolyline' {{
-            $flat = New-Object System.Collections.Generic.List[double]
-            foreach ($pt in $e.points) {{ $flat.Add([double]$pt[0]); $flat.Add([double]$pt[1]) }}
-            $ent = $targetSpace.AddLightWeightPolyline($flat.ToArray())
-            if ($e.closed) {{ $ent.Closed = $true }}
-        }}
-        'text' {{
-            $ent = $targetSpace.AddText([string]$e.text, (Pt3 $e.insert), [double]$e.height)
-            try {{ $ent.StyleName = 'VN_ARIAL' }} catch {{}}
-        }}
-        'mtext' {{
-            $w = if ($null -ne $e.width) {{ [double]$e.width }} else {{ 50.0 }}
-            $ent = $targetSpace.AddMText((Pt3 $e.insert), $w, [string]$e.text)
-            if ($null -ne $e.height) {{ $ent.Height = [double]$e.height }}
-            try {{ $ent.StyleName = 'VN_ARIAL' }} catch {{}}
-        }}
-        'hatch' {{
-            $pat = if ($e.pattern) {{ [string]$e.pattern }} else {{ 'ANSI31' }}
-            $ent = $targetSpace.AddHatch(0, $pat, $true)
-            $flat = New-Object System.Collections.Generic.List[double]
-            foreach ($pt in $e.boundary_points) {{ $flat.Add([double]$pt[0]); $flat.Add([double]$pt[1]) }}
-            $loop = $targetSpace.AddLightWeightPolyline($flat.ToArray())
-            $loop.Closed = $true
-            $ent.AppendOuterLoop(@($loop))
-            if ($null -ne $e.scale) {{ $ent.PatternScale = [double]$e.scale }}
-            $ent.Evaluate()
-        }}
-        'insert_block' {{
-            $xs = if ($null -ne $e.xscale) {{ [double]$e.xscale }} else {{ 1.0 }}
-            $ys = if ($null -ne $e.yscale) {{ [double]$e.yscale }} else {{ 1.0 }}
-            $zs = if ($null -ne $e.zscale) {{ [double]$e.zscale }} else {{ 1.0 }}
-            $rot = if ($null -ne $e.rotation_rad) {{ [double]$e.rotation_rad }} else {{ 0.0 }}
-            $ent = $targetSpace.InsertBlock((Pt3 $e.insert), [string]$e.block_name, $xs, $ys, $zs, $rot)
-            if ($e.attributes -and $ent.HasAttributes) {{
-                foreach ($att in $ent.GetAttributes()) {{
-                    $val = $e.attributes.($att.TagString)
-                    if ($null -ne $val) {{ $att.TextString = [string]$val }}
-                }}
-            }}
-        }}
-        'mleader' {{
-            $flat = New-Object System.Collections.Generic.List[double]
-            foreach ($pt in $e.points) {{
-                $flat.Add([double]$pt[0]); $flat.Add([double]$pt[1])
-                $flat.Add($(if ($pt.Count -ge 3) {{ [double]$pt[2] }} else {{ 0.0 }}))
-            }}
-            $idx = 0
-            $ent = $targetSpace.AddMLeader($flat.ToArray(), [ref]$idx)
-            if ($e.text) {{ $ent.TextString = [string]$e.text }}
-        }}
-        'table' {{
-            $rows = [int]$e.rows; $cols = [int]$e.cols
-            $rh = if ($null -ne $e.row_height) {{ [double]$e.row_height }} else {{ 6.0 }}
-            $cw = if ($null -ne $e.col_width) {{ [double]$e.col_width }} else {{ 35.0 }}
-            $ent = $targetSpace.AddTable((Pt3 $e.insert), $rows, $cols, $rh, $cw)
-            if ($e.data) {{
-                for ($r = 0; $r -lt [Math]::Min($rows, $e.data.Count); $r++) {{
-                    for ($c = 0; $c -lt [Math]::Min($cols, $e.data[$r].Count); $c++) {{
-                        $ent.SetText($r, $c, [string]$e.data[$r][$c])
-                    }}
-                }}
-            }}
-        }}
-        'dim_aligned' {{
-            $ent = $targetSpace.AddDimAligned((Pt3 $e.p1), (Pt3 $e.p2), (Pt3 $e.text_pos))
-            if ($e.text_override) {{ $ent.TextOverride = [string]$e.text_override }}
-        }}
-        'dim_linear' {{
-            $ang = if ($null -ne $e.angle_rad) {{ [double]$e.angle_rad }} else {{ 0.0 }}
-            $ent = $targetSpace.AddDimRotated((Pt3 $e.p1), (Pt3 $e.p2), (Pt3 $e.text_pos), $ang)
-            if ($e.text_override) {{ $ent.TextOverride = [string]$e.text_override }}
-        }}
-        'dim_diameter' {{
-            $ent = $targetSpace.AddDimDiametric((Pt3 $e.chord1), (Pt3 $e.chord2), [double]$e.leader_len)
-            if ($e.text_override) {{ $ent.TextOverride = [string]$e.text_override }}
-        }}
-    }}
-    if ($ent) {{
-        if ($e.layer) {{ $ent.Layer = [string]$e.layer }}
-        $count++
-    }}
-}}
-if ($payload.zoom) {{ $acad.ZoomExtents() }}
-$doc.Regen(1)
-$didSave = $false
-if ($payload.auto_save -and $doc.FullName -and ($doc.GetVariable('DWGTITLED') -ne 0)) {{
-    if ($doc.FullName.EndsWith('.dxf', [System.StringComparison]::OrdinalIgnoreCase)) {{
-        $fn = $doc.FullName.Replace('\', '/')
-        $doc.SendCommand("(progn (setvar `"FILEDIA`" 0) (setvar `"EXPERT`" 5) (command `"_SAVEAS`" `"_DXF`" `"16`" `"$fn`") (setvar `"EXPERT`" 0) (setvar `"FILEDIA`" 1))`n")
-    }} else {{
-        $doc.Save()
-    }}
-    $didSave = $true
-}}
-@{{ drawn = $count; document = $doc.Name; space = $payload.space; saved = $didSave }} | ConvertTo-Json -Compress
-"""
-    return _run_ps(ps, timeout=45)
+    _ensure_acad_pipe()
+    return pipe_call(PIPE_NAME, "draw_entities", args, timeout_s=50.0)
 
 
 def tool_autocad_audit_and_inspect(_args: dict[str, Any]) -> dict[str, Any]:
-    ps = r"""
-$ErrorActionPreference = 'Stop'
-$acad = [Runtime.InteropServices.Marshal]::GetActiveObject('AutoCAD.Application')
-if ($acad.Documents.Count -eq 0) { throw 'No open AutoCAD document.' }
-$doc = $acad.ActiveDocument
-$spaceObj = if ([int]$doc.ActiveSpace -eq 0) { $doc.PaperSpace } else { $doc.ModelSpace }
-$hardcodedDims = @()
-$textBoxes = @()
-$outOfFrame = @()
-$total = 0
-
-$isPaper = ([int]$doc.ActiveSpace -eq 0)
-$pW = 0.0; $pH = 0.0
-if ($isPaper) {
-    try { $doc.ActiveLayout.GetPaperSize([ref]$pW, [ref]$pH) } catch {}
-}
-
-foreach ($ent in $spaceObj) {
-    $total++
-    $objName = $ent.ObjectName
-    if ($objName -like '*Dimension*') {
-        try {
-            $ov = [string]$ent.TextOverride
-            if ($ov -and (-not $ov.Contains('<>'))) {
-                $hardcodedDims += @{ handle = $ent.Handle; override = $ov; measurement = [math]::Round($ent.Measurement, 2) }
-            }
-        } catch {}
-    }
-    if (($objName -eq 'AcDbText') -or ($objName -eq 'AcDbMText')) {
-        try {
-            $minP = $null; $maxP = $null
-            $ent.GetBoundingBox([ref]$minP, [ref]$maxP)
-            $textBoxes += @{
-                handle = $ent.Handle
-                type = $objName
-                x0 = [double]$minP[0]; y0 = [double]$minP[1]
-                x1 = [double]$maxP[0]; y1 = [double]$maxP[1]
-            }
-        } catch {}
-    } elseif ($objName -like '*Dimension*') {
-        try {
-            $tp = $ent.TextPosition
-            $th = 2.5
-            try { $th = [double]$ent.TextHeight * [double]$ent.ScaleFactor } catch {}
-            if ($th -le 0) { $th = 2.5 }
-            $textBoxes += @{
-                handle = $ent.Handle
-                type = $objName
-                x0 = [double]$tp[0] - (2.0 * $th); y0 = [double]$tp[1] - (0.6 * $th)
-                x1 = [double]$tp[0] + (2.0 * $th); y1 = [double]$tp[1] + (0.6 * $th)
-            }
-        } catch {}
-    }
-    if ($isPaper -and $pW -gt 0 -and $pH -gt 0) {
-        try {
-            $minP = $null; $maxP = $null
-            $ent.GetBoundingBox([ref]$minP, [ref]$maxP)
-            if (($minP[0] -lt -2.0) -or ($minP[1] -lt -2.0) -or ($maxP[0] -gt ($pW + 2.0)) -or ($maxP[1] -gt ($pH + 2.0))) {
-                $outOfFrame += @{ handle = $ent.Handle; type = $objName; maxX = [math]::Round($maxP[0],1); maxY = [math]::Round($maxP[1],1) }
-            }
-        } catch {}
-    }
-}
-
-$overlaps = @()
-$lim = [Math]::Min($textBoxes.Count, 2000)
-for ($i = 0; $i -lt $lim; $i++) {
-    $a = $textBoxes[$i]
-    for ($j = $i + 1; $j -lt $lim; $j++) {
-        $b = $textBoxes[$j]
-        if (($a.x0 -lt $b.x1) -and ($a.x1 -gt $b.x0) -and ($a.y0 -lt $b.y1) -and ($a.y1 -gt $b.y0)) {
-            $overlaps += @{ a = $a.handle; b = $b.handle; typeA = $a.type; typeB = $b.type }
-            if ($overlaps.Count -ge 25) { break }
-        }
-    }
-    if ($overlaps.Count -ge 25) { break }
-}
-
-@{
-    document = $doc.Name
-    activeLayout = $doc.ActiveLayout.Name
-    totalEntities = $total
-    cmdactive = $doc.GetVariable('CMDACTIVE')
-    lastprompt = $doc.GetVariable('LASTPROMPT')
-    hardcodedDims = $hardcodedDims
-    textDimOverlaps = $overlaps
-    outOfFrameEntities = $outOfFrame
-} | ConvertTo-Json -Depth 5 -Compress
-"""
-    return _run_ps(ps, timeout=45)
+    _ensure_acad_pipe()
+    return pipe_call(PIPE_NAME, "audit_and_inspect", {}, timeout_s=45.0)
 
 
 def tool_acade_project_init(args: dict[str, Any]) -> dict[str, Any]:
@@ -693,58 +434,41 @@ def tool_acade_project_init(args: dict[str, Any]) -> dict[str, Any]:
         (project_dir / f"{project_name}.wdt").write_text(wdt_txt, encoding="utf-8")
         (project_dir / "DEFAULT.WDT").write_text(wdt_txt, encoding="utf-8")
 
-    payload_q = _ps_quote(json.dumps({
-        "wdp_path": str(wdp_path).replace("\\", "/"),
-        "sheet_specs": sheet_specs,
-        "load_lisp": _lisp_acade_load(),
-    }))
-    ps = f"""
-$ErrorActionPreference = 'Stop'
-$payload = ConvertFrom-Json {payload_q}
-$acad = [Runtime.InteropServices.Marshal]::GetActiveObject('AutoCAD.Application')
-$created = @()
-foreach ($spec in $payload.sheet_specs) {{
-    $sp = [string]$spec.path
-    if (-not (Test-Path $sp)) {{
-        $d = $acad.Documents.Add([string]$spec.dwt)
-    }} else {{
-        $d = $acad.Documents.Open($sp)
-    }}
-    foreach ($space in @($d.ModelSpace, $d.PaperSpace)) {{
-        foreach ($ent in $space) {{
-            if ($ent.ObjectName -eq 'AcDbBlockReference') {{
-                $bn = [string]$ent.EffectiveName
-                if ($bn -eq 'WD_M') {{
-                    foreach ($att in $ent.GetAttributes()) {{
-                        if ($att.TagString.ToUpper() -eq 'SHEET') {{ $att.TextString = [string]$spec.sheet_no }}
-                    }}
-                }} elseif ($bn -eq 'TITLE_BLOCK_A3_BILINGUAL') {{
-                    foreach ($att in $ent.GetAttributes()) {{
-                        $k = $att.TagString.ToUpper()
-                        $v = $spec.tb.$k
-                        if ($null -ne $v) {{ $att.TextString = [string]$v }}
-                    }}
-                }}
-            }}
-        }}
-    }}
-    if (-not (Test-Path $sp)) {{
-        $d.SaveAs($sp)
-        $created += $sp
-    }} else {{
-        $d.Save()
-    }}
-    $d.Close($false)
-}}
-$first = [string]$payload.sheet_specs[0].path
-$doc = $acad.Documents.Open($first)
-$doc.Activate()
-$wdpLisp = $payload.wdp_path
-$cmd = $payload.load_lisp + '(command "_AEOPENPROJECT" "' + $wdpLisp + '") (if (boundp \'c:ace_add_dwg_to_project) (c:ace_add_dwg_to_project nil (list "" "" "" 1))) (command "_AEREBUILDDB")' + "`n"
-$doc.SendCommand($cmd)
-@{{ wdp = $payload.wdp_path; created_dwgs = $created; active = $doc.FullName }} | ConvertTo-Json -Compress
-"""
-    return _run_ps(ps, timeout=75)
+    shutil_mod = __import__("shutil")
+    created: list[str] = []
+    for spec in sheet_specs:
+        sp = Path(spec["path"])
+        dwt = Path(spec["dwt"])
+        if not sp.exists():
+            shutil_mod.copy2(dwt, sp)
+            created.append(str(sp))
+
+    first_dwg = Path(sheet_specs[0]["path"])
+    _ensure_acad_pipe(initial_dwg=first_dwg)
+
+    for spec in sheet_specs:
+        sp = Path(spec["path"])
+        tool_autocad_open_or_new({"path": str(sp)})
+        sync_expr = _lisp_sync_wdm_and_titleblock(spec["sheet_no"], spec["tb"])
+        _eval_in_acad_lisp(f'(progn {sync_expr} {_lisp_autosave_snippet().strip()})', timeout_sec=30.0)
+        if sp != first_dwg:
+            sp_posix = sp.as_posix()
+            _eval_in_acad_lisp(
+                f'(vlax-for _d (vla-get-Documents (vlax-get-acad-object)) '
+                f'(if (= (strcase (vl-string-translate "\\\\" "/" (vla-get-FullName _d))) (strcase "{sp_posix}")) '
+                f'(vla-Close _d :vlax-false)))',
+                timeout_sec=20.0,
+            )
+
+    tool_autocad_open_or_new({"path": str(first_dwg)})
+    wdp_posix = wdp_path.as_posix()
+    _eval_in_acad_lisp(
+        f'(progn {_lisp_acade_load()} '
+        f'(setvar "FILEDIA" 0) (command "_AEOPENPROJECT" "{wdp_posix}") '
+        f'(command "_AEREBUILDDB") (setvar "FILEDIA" 1) (getvar "DWGNAME"))',
+        timeout_sec=50.0,
+    )
+    return {"wdp": wdp_posix, "created_dwgs": created, "active": str(first_dwg)}
 
 
 SECOND_POLE_BLOCK_MAP = {
@@ -1048,12 +772,13 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
             )
         mx = 172.0 + mod_idx * 182.0
         my = 256.0  # Safe Y<=256 so INST/LOC attributes above HP1W--L stay strictly <= 283mm (below Y=287 X-Zone bar!)
-        mod_tag = f"-A1:S{slot}"
-        first_inst = (ch_rows[0].get("INST") or "=PLC1").strip() if ch_rows else "=PLC1"
+        rack_idx = int(rack) if rack.isdigit() else 0
+        mod_tag = f"-A{rack_idx + 1}:S{slot}"
+        first_inst = (ch_rows[0].get("INST") or f"=PLC{rack_idx + 1}").strip() if ch_rows else f"=PLC{rack_idx + 1}"
         is_do_mod = any((r.get("ADDRESS") or "").strip().upper().lstrip("%").startswith("Q") for r in ch_rows)
         common_layer = "CTRL_0VDC_BUWH_0.75" if is_do_mod else "CTRL_24VDC_DBU_0.75"
-        common_sig = "BUS_0VDC_PELV" if is_do_mod else "BUS_24VDC_PELV"
-        common_wno = "0VDC" if is_do_mod else "+24VDC"
+        common_sig = str(args.get("do_sigcode") or "BUS_0VDC_PELV") if is_do_mod else str(args.get("di_sigcode") or "BUS_24VDC_PELV")
+        common_wno = str(args.get("do_wireno") or "0VDC") if is_do_mod else str(args.get("di_wireno") or "+24VDC")
         rail_x = mx - 115.0
 
         # Insert real ACADE PLCIO module header block (HP1W--L: TAG, LINE1, LINE2, MFG, CAT, LOC, INST)
@@ -1100,8 +825,8 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
                     f'(setvar "CLAYER" {_lisp_str(wtype)}) '
                     f'(c:wd_wire_quik \'({mx - 7.0} {cy} 0.0) \'({term_x + 1.25} {cy} 0.0) nil)'
                 )
-                # Insert intermediate terminal ht0001 (-X2 / -X3)
-                t_strip = "-X3" if is_do_mod else "-X2"
+                # Insert intermediate terminal ht0001 (-X1 / -X2 / -X3)
+                t_strip = str(args.get("terminal_strip") or (f"-X{rack_idx + 1}" if rack_idx > 0 else ("-X3" if is_do_mod else "-X2")))
                 t_num = f"S{slot}.{ch_idx + 1}"
                 lisp_parts.append(
                     f'(setq _tm (c:wd_insym2 "ht0001" \'({term_x} {cy} 0.0) 1.0 nil)) '
@@ -1120,13 +845,17 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
                     f'(c:wd_wire_quik \'({term_x - 1.25} {cy} 0.0) \'({pe_x + 7.5} {cy} 0.0) nil)'
                 )
                 # Insert horizontal peripheral symbol (X4TERM01 @ -7.5, X1TERM02 @ +7.5) with default MFG/CAT if omitted
-                def_mfg = (row.get("MFG") or "SIEMENS").strip().upper()
+                def_mfg = (row.get("MFG") or ("SMC" if blk == "HSV1" else "SIEMENS")).strip().upper()
                 def_cat = (row.get("CAT") or "").strip()
                 if not def_cat:
                     if blk == "HCR1":
                         def_cat = "3RT2026-1BB40"
                     elif blk == "HLT1A":
                         def_cat = "3SU1152-6AA20-1AA0"
+                    elif blk == "HPX1":
+                        def_cat = "3RG4012-0AG01"
+                    elif blk == "HSV1":
+                        def_cat = "SY5120-5DZ-01"
                     elif blk in ("HSW12", "HSW11", "HPB11", "HPB12"):
                         def_cat = "3SU1150-1HB20-1CG0"
                 lisp_parts.append(
@@ -1147,10 +876,22 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
                     f'(c:wd_wire_quik \'({pe_x - 7.5} {cy} 0.0) \'({rail_x} {cy} 0.0) nil)'
                 )
             else:
-                # Spare / Analog stub wire going left from HP1WA-D X4TERM_
+                # Pre-wired SPARE channel (Hard Guardrail #9): wire cleanly from HP1WA-D X4TERM_ to dedicated spare terminal ht0001!
+                term_x = mx - 30.0
+                t_strip = str(args.get("terminal_strip") or (f"-X{rack_idx + 1}" if rack_idx > 0 else ("-X3" if is_do_mod else "-X2")))
+                t_num = f"S{slot}.{ch_idx + 1}"
                 lisp_parts.append(
                     f'(setvar "CLAYER" {_lisp_str(wtype)}) '
-                    f'(c:wd_wire_quik \'({mx - 7.0} {cy} 0.0) \'({mx - 45.0} {cy} 0.0) nil)'
+                    f'(c:wd_wire_quik \'({mx - 7.0} {cy} 0.0) \'({term_x + 1.25} {cy} 0.0) nil) '
+                    f'(setq _tm (c:wd_insym2 "ht0001" \'({term_x} {cy} 0.0) 1.0 nil)) '
+                    f'(if _tm (progn '
+                    f'(c:wd_modattrval _tm "TAGSTRIP" {_lisp_str(t_strip)} nil) '
+                    f'(c:wd_modattrval _tm "TERM01" {_lisp_str(t_num)} nil) '
+                    f'(c:wd_modattrval _tm "MFG" "PHOENIX CONTACT" nil) '
+                    f'(c:wd_modattrval _tm "CAT" "3004100" nil) '
+                    f'(c:wd_modattrval _tm "LOC" "+MAIN_PNL" nil) '
+                    f'(c:wd_modattrval _tm "INST" {_lisp_str(first_inst)} nil) '
+                    f'(entupd _tm)))'
                 )
 
         # Draw vertical common rail on left (0VDC return for DO coils/lamps; +24VDC supply for DI switches/sensors) + Signal Arrow
@@ -1196,30 +937,15 @@ def tool_acade_sync_panel_footprints(args: dict[str, Any]) -> dict[str, Any]:
     mdb_path = Path(args["mdb_path"]).resolve()
     if not mdb_path.exists():
         raise FileNotFoundError(f"Scratch database not found: {mdb_path}")
-    mdb_str = str(mdb_path).replace("'", "''")
-    ps = f"""
-$ErrorActionPreference = 'Stop'
-$conn = New-Object System.Data.Odbc.OdbcConnection("Driver={{Microsoft Access Driver (*.mdb, *.accdb)}};Dbq={mdb_str};")
-$conn.Open()
-$cmd = $conn.CreateCommand()
-$cmd.CommandText = "SELECT TAGNAME, MFG, CAT, LOC, INST, DESC1 FROM [COMP] WHERE PAR1_CHLD2='1' AND LOC IN ('+MAIN_PNL','+DOOR') ORDER BY LOC, TAGNAME"
-$r = $cmd.ExecuteReader()
-$items = @()
-while ($r.Read()) {{
-    $items += @{{
-        tag = [string]$r['TAGNAME']
-        mfg = [string]$r['MFG']
-        cat = [string]$r['CAT']
-        loc = [string]$r['LOC']
-        inst = [string]$r['INST']
-        desc = [string]$r['DESC1']
-    }}
-}}
-$r.Close()
-$conn.Close()
-@{{ count = $items.Count; components = $items }} | ConvertTo-Json -Depth 4 -Compress
-"""
-    res = _run_ps(ps, timeout=30)
+    raw_items = _odbc_query_mdb(
+        mdb_path,
+        "SELECT TAGNAME, MFG, CAT, LOC, INST, DESC1 FROM [COMP] WHERE PAR1_CHLD2='1' AND LOC IN ('+MAIN_PNL','+DOOR') ORDER BY LOC, TAGNAME",
+    )
+    items = [
+        {"tag": r[0], "mfg": r[1], "cat": r[2], "loc": r[3], "inst": r[4], "desc": r[5]}
+        for r in raw_items
+    ]
+    res: dict[str, Any] = {"count": len(items), "components": items}
     if args.get("run_aefootprint") and res.get("components"):
         panel_candidates = [
             Path(os.environ["ACADE_LIBS_DIR"]) / "panel" / "CUSTOM" if os.environ.get("ACADE_LIBS_DIR") else None,
@@ -1427,7 +1153,6 @@ def tool_acade_place_db_reports_on_drawing(args: dict[str, Any]) -> dict[str, An
     if not mdb_path.exists():
         raise FileNotFoundError(f"Scratch database not found: {mdb_path}")
 
-    mdb_str = str(mdb_path).replace("'", "''")
     if report_type == "BOM":
         sql = (
             "SELECT MFG, CAT, ASSYCODE, MAX(DESC1) AS DESCR, COUNT(*) AS QTY, MAX(LOC) AS LOCS "
@@ -1456,60 +1181,29 @@ def tool_acade_place_db_reports_on_drawing(args: dict[str, Any]) -> dict[str, An
     else:
         raise ValueError(f"Unsupported report_type: {report_type}")
 
-    ps = f"""
-$conn = New-Object System.Data.Odbc.OdbcConnection("Driver={{Microsoft Access Driver (*.mdb, *.accdb)}};Dbq={mdb_str};")
-$conn.Open()
-$tables = @($conn.GetSchema("Tables") | Where-Object {{ $_.TABLE_TYPE -eq "TABLE" }} | Select-Object -ExpandProperty TABLE_NAME)
-$rows = @()
-try {{
-    $cmd = $conn.CreateCommand()
-    $cmd.CommandText = "{sql}"
-    $r = $cmd.ExecuteReader()
-    while ($r.Read()) {{
-        $row = @()
-        for ($i = 0; $i -lt $r.FieldCount; $i++) {{
-            $v = $r.GetValue($i)
-            $row += if ($v -is [DBNull]) {{ "" }} else {{ [string]$v }}
-        }}
-        $rows += ,$row
-    }}
-    $r.Close()
-}} catch {{}}
-if (($rows.Count -eq 0) -and ("{report_type}" -eq "WIRE_FROM_TO")) {{
-    if ($tables -contains "TERMS") {{
-        $cmd2 = $conn.CreateCommand()
-        $cmd2.CommandText = "SELECT WIRENO, TAGSTRIP, TERM, LOC, INST FROM [TERMS] WHERE WIRENO IS NOT NULL AND WIRENO<>'' ORDER BY WIRENO, TAGSTRIP, TERM"
-        $r2 = $cmd2.ExecuteReader()
-        while ($r2.Read()) {{
-            $wno = [string]$r2["WIRENO"]
-            $ts = [string]$r2["TAGSTRIP"]
-            $tm = [string]$r2["TERM"]
-            $lc = [string]$r2["LOC"]
-            $in = [string]$r2["INST"]
-            $rows += ,@($wno, $ts, $tm, $lc, $in, "BU", "0.75", "CTRL_24VDC_DBU_0.75")
-        }}
-        $r2.Close()
-    }}
-    if (($rows.Count -eq 0) -and ($tables -contains "PLCIO")) {{
-        $cmd3 = $conn.CreateCommand()
-        $cmd3.CommandText = "SELECT ADDR, TAGNAME, TERM, TERMDESC, DESCA FROM [PLCIO] WHERE ADDR IS NOT NULL AND ADDR<>'' ORDER BY TAGNAME, ADDR"
-        $r3 = $cmd3.ExecuteReader()
-        while ($r3.Read()) {{
-            $ad = [string]$r3["ADDR"]
-            $tg = [string]$r3["TAGNAME"]
-            $tm = [string]$r3["TERM"]
-            $td = [string]$r3["TERMDESC"]
-            $ds = [string]$r3["DESCA"]
-            $rows += ,@($ad, $tg, $tm, $td, $ds, "BU", "0.5", "SIG_PLC_BU_0.5")
-        }}
-        $r3.Close()
-    }}
-}}
-$conn.Close()
-@{{ rows = $rows }} | ConvertTo-Json -Depth 4 -Compress
-"""
-    data_res = _run_ps(ps, timeout=30)
-    raw_rows = data_res.get("rows") or []
+    try:
+        raw_rows = _odbc_query_mdb(mdb_path, sql)
+    except Exception:
+        raw_rows = []
+
+    if not raw_rows and report_type == "WIRE_FROM_TO":
+        try:
+            term_rows = _odbc_query_mdb(
+                mdb_path,
+                "SELECT WIRENO, TAGSTRIP, TERM, LOC, INST FROM [TERMS] WHERE WIRENO IS NOT NULL AND WIRENO<>'' ORDER BY WIRENO, TAGSTRIP, TERM",
+            )
+            raw_rows = [[r[0], r[1], r[2], r[3], r[4], "BU", "0.75", "CTRL_24VDC_DBU_0.75"] for r in term_rows]
+        except Exception:
+            pass
+        if not raw_rows:
+            try:
+                plc_rows = _odbc_query_mdb(
+                    mdb_path,
+                    "SELECT ADDR, TAGNAME, TERM, TERMDESC, DESCA FROM [PLCIO] WHERE ADDR IS NOT NULL AND ADDR<>'' ORDER BY TAGNAME, ADDR",
+                )
+                raw_rows = [[r[0], r[1], r[2], r[3], r[4], "BU", "0.5", "SIG_PLC_BU_0.5"] for r in plc_rows]
+            except Exception:
+                pass
 
     if report_type == "BOM":
         db_rows: list[list[str]] = []
@@ -1916,7 +1610,7 @@ def tool_acade_electrical_audit(args: dict[str, Any]) -> dict[str, Any]:
 TOOLS = [
     {
         "name": "autocad_status",
-        "description": "Inspect the running Autodesk AutoCAD instance via COM: active document, open documents, active layout, DBMOD, CMDACTIVE, and $INSUNITS.",
+        "description": "Inspect the running Autodesk AutoCAD 2027 instance via in-process .NET Add-in Named Pipe: active document, open documents, active layout, DBMOD, CMDACTIVE, and $INSUNITS.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
@@ -1929,7 +1623,7 @@ TOOLS = [
     },
     {
         "name": "autocad_run_command",
-        "description": "Send an AutoCAD command or AutoLISP expression directly to ActiveDocument.SendCommand() and auto-save if titled.",
+        "description": "Execute an AutoCAD command or AutoLISP expression in-process via Named Pipe and auto-save if titled.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1941,7 +1635,7 @@ TOOLS = [
     },
     {
         "name": "autocad_reload_file",
-        "description": "Reload a .dwg/.dxf tab in AutoCAD via COM safely (backs up unsaved edits if DBMOD != 0 unless force=true).",
+        "description": "Reload a .dwg/.dxf tab in AutoCAD via in-process .NET Add-in safely (backs up unsaved edits if DBMOD != 0 unless force=true).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1954,7 +1648,7 @@ TOOLS = [
     },
     {
         "name": "autocad_draw_entities",
-        "description": "Draw CAD entities (line, circle, arc, lwpolyline, text, mtext, hatch, insert_block, mleader, table, dim_aligned, dim_linear, dim_diameter) directly into ModelSpace or PaperSpace via COM and auto-save.",
+        "description": "Draw CAD entities (line, circle, arc, lwpolyline, text, mtext, hatch, insert_block, mleader, table, dim_aligned, dim_linear, dim_diameter) directly into ModelSpace or PaperSpace inside an atomic .NET Transaction (auto-rollback on error) and auto-save.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2007,7 +1701,7 @@ TOOLS = [
     },
     {
         "name": "autocad_audit_and_inspect",
-        "description": "Audit active AutoCAD drawing via COM for hardcoded Dimension TextOverride, Text/Dim bounding-box overlaps, out-of-frame PaperSpace entities, CMDACTIVE, and LASTPROMPT.",
+        "description": "Audit active AutoCAD drawing in-process via .NET Transaction for hardcoded Dimension TextOverride, Text/Dim bounding-box overlaps, out-of-frame PaperSpace entities, CMDACTIVE, and LASTPROMPT.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {

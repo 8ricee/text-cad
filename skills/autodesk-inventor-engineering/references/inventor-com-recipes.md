@@ -1,39 +1,53 @@
-# Autodesk Inventor PowerShell COM Recipes (`inventor_run_script`)
+# Autodesk Inventor In-Process iLogic VB.NET Recipes (`inventor_run_script`)
 
-Use these patterns inside `inventor_run_script` (`$inv` and `$doc` are pre-bound).
-Note: Inventor COM API internal length unit is **centimeters (`cm`)** (`10 mm = 1 cm`). Always write parameter expressions with `' mm'` suffix or divide `mm / 10.0`.
+Use these patterns inside `inventor_run_script` (`ilogic_script`).
+`Agy.InventorBridge` executes the rule **in-process on Inventor's STA UI thread** wrapped in an **atomic `Inventor.Transaction`** (`txn.Abort()` rolls back every sketch, feature, parameter, and constraint on error).
+`ThisApplication` (`Inventor.Application`) and `ThisDoc.Document` (`Inventor.Document`) are pre-bound natively.
+Note: Inventor API internal length unit is **centimeters (`cm`)** (`10 mm = 1 cm`). Always write parameter expressions with `" mm"` suffix or divide `mm / 10.0`.
 
 ## 1. Create `UserParameters` on `MasterSkeleton.ipt` or Sheet Metal `.ipt`
-```powershell
-$cd = $doc.ComponentDefinition
-$ups = $cd.Parameters.UserParameters
-$ups.AddByExpression('PlateWidth', '740 mm', 11269) | Out-Null   # kMillimeterLengthUnits = 11269
-$ups.AddByExpression('PlateHeight', '1140 mm', 11269) | Out-Null
-$ups.AddByExpression('FlangeHeight', '20 mm', 11269) | Out-Null
+```vbnet
+Dim doc As PartDocument = CType(ThisDoc.Document, PartDocument)
+Dim ups As UserParameters = doc.ComponentDefinition.Parameters.UserParameters
+ups.AddByExpression("PlateWidth", "740 mm", UnitsTypeEnum.kMillimeterLengthUnits)
+ups.AddByExpression("PlateHeight", "1140 mm", UnitsTypeEnum.kMillimeterLengthUnits)
+ups.AddByExpression("FlangeHeight", "20 mm", UnitsTypeEnum.kMillimeterLengthUnits)
 ```
 
 ## 2. Fully Constrained `PlanarSketch` + Sheet Metal `FaceFeature` & `FlangeFeature`
-```powershell
-$cd = $doc.ComponentDefinition
-$sk = $cd.Sketches.Add($cd.WorkPlanes.Item(3)) # XY Plane
-$p0 = $inv.TransientGeometry.CreatePoint2d(0, 0)
-$p1 = $inv.TransientGeometry.CreatePoint2d(74.0, 114.0) # cm = 740 x 1140 mm
-$rect = $sk.SketchLines.AddAsTwoPointRectangle($p0, $p1)
-$sk.GeometricConstraints.AddGround($rect.Item(1).StartSketchPoint) | Out-Null
-$dW = $sk.DimensionConstraints.AddTwoPointDistance($rect.Item(1).StartSketchPoint, $rect.Item(1).EndSketchPoint, 19201, $inv.TransientGeometry.CreatePoint2d(37, -5))
-$dW.Parameter.Expression = 'PlateWidth'
-$dH = $sk.DimensionConstraints.AddTwoPointDistance($rect.Item(2).StartSketchPoint, $rect.Item(2).EndSketchPoint, 19202, $inv.TransientGeometry.CreatePoint2d(79, 57))
-$dH.Parameter.Expression = 'PlateHeight'
-$prof = $sk.Profiles.AddForSolid()
-$faceDef = $cd.Features.FaceFeatures.CreateFaceFeatureDefinition($prof)
-$face = $cd.Features.FaceFeatures.Add($faceDef)
-$doc.Update2($true)
+```vbnet
+Dim doc As PartDocument = CType(ThisDoc.Document, PartDocument)
+Dim cd As SheetMetalComponentDefinition = CType(doc.ComponentDefinition, SheetMetalComponentDefinition)
+Dim tg As TransientGeometry = ThisApplication.TransientGeometry
+
+Dim sk As PlanarSketch = cd.Sketches.Add(cd.WorkPlanes.Item(3)) ' XY Plane
+Dim rect As SketchEntitiesEnumerator = sk.SketchLines.AddAsTwoPointRectangle(
+    tg.CreatePoint2d(0, 0),
+    tg.CreatePoint2d(74.0, 114.0)) ' cm = 740 x 1140 mm
+
+Dim l1 As SketchLine = CType(rect.Item(1), SketchLine)
+Dim l2 As SketchLine = CType(rect.Item(2), SketchLine)
+sk.GeometricConstraints.AddGround(l1.StartSketchPoint)
+
+Dim dW = sk.DimensionConstraints.AddTwoPointDistance(
+    l1.StartSketchPoint, l1.EndSketchPoint,
+    DimensionOrientationEnum.kHorizontalDim, tg.CreatePoint2d(37, -5))
+dW.Parameter.Expression = "PlateWidth"
+
+Dim dH = sk.DimensionConstraints.AddTwoPointDistance(
+    l2.StartSketchPoint, l2.EndSketchPoint,
+    DimensionOrientationEnum.kVerticalDim, tg.CreatePoint2d(79, 57))
+dH.Parameter.Expression = "PlateHeight"
+
+Dim prof As Profile = sk.Profiles.AddForSolid()
+Dim faceDef As FaceFeatureDefinition = cd.Features.FaceFeatures.CreateFaceFeatureDefinition(prof)
+cd.Features.FaceFeatures.Add(faceDef)
 ```
 
 ## 3. Assembly Occurrence Placement & Grounding
-```powershell
-$asm = $doc.ComponentDefinition
-$mat = $inv.TransientGeometry.CreateMatrix()
-$occ = $asm.Occurrences.Add('C:\path\to\part.ipt', $mat)
-$occ.Grounded = $true
+```vbnet
+Dim asmDoc As AssemblyDocument = CType(ThisDoc.Document, AssemblyDocument)
+Dim mat As Matrix = ThisApplication.TransientGeometry.CreateMatrix()
+Dim occ As ComponentOccurrence = asmDoc.ComponentDefinition.Occurrences.Add("C:\path\to\part.ipt", mat)
+occ.Grounded = True
 ```

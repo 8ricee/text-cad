@@ -1,9 +1,12 @@
-# Python / Cache
+# Python / .NET Build & Cache
 __pycache__/
 *.py[cod]
 *$py.class
 .venv/
 venv/
+bin/
+obj/
+*.user
 .mplcache/
 .pytest_cache/
 

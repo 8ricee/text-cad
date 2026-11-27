@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.0.0 — 2026-11-27
+- **In-Process `.NET 10` Add-ins + Named Pipe Architecture (`Agy.AutoCadBridge` & `Agy.InventorBridge`)**: Replaced 100% of out-of-process PowerShell COM (`GetActiveObject`) and `WM_COPYDATA` bridges with in-process `.NET 10` Add-ins (`addins/autocad/Agy.AutoCadBridge`, `addins/inventor/Agy.InventorBridge`) communicating over Windows Named Pipes (`\\.\pipe\agy-autocad-direct`, `\\.\pipe\agy-inventor-direct`) via zero-dependency `mcp_servers/pipe_client.py`.
+- **Atomic Transactions & Automatic Rollback**: `autocad_draw_entities` runs inside `Database.TransactionManager.StartTransaction()` (`tr.Abort()` on error), ACADE `c:wd_*` LISP operations wrap `vla-StartUndoMark` / `vla-EndUndoMark` rollback, and Inventor mutations (`inventor_run_script` via native `IiLogicAutomation`, `inventor_update_parameters`) run inside `Inventor.Transaction` (`txn.Abort()` on error).
+- **Direct Win32 `odbc32.dll` Access `.mdb` Reader**: Replaced PowerShell ODBC queries in `autocad_mcp_server.py` (`v3.0.0`) with an in-process `ctypes.WinDLL("odbc32")` reader.
+
 ## v1.7.0 — 2026-11-27
 - **100% Paper Space Layout (`ISO_A3`, `$TILEMODE=0`) across ALL drawings (`01..09`)**: Removed all borders and Title Blocks from `Model Space` in `TEMPLATE_IEC_A3.dwt` and `TEMPLATE_PANEL_LAYOUT_A3.dwt` (`MODEL_TB = 0`, `PAPER_TB = 1`, Display-Locked `1:1` and `1:10` `VIEWPORT`s, ISO 5456-2 projection symbol).
 - **Multi-Pole Switching (`poles=2|3|4`) & Verified Industrial Circuit Macros (`acade_insert_verified_circuit`)**: Added linked multi-pole insertion (`VCB11Q13 + VCB21Q13`, `VFU1 + VFU2`, `VCR21`, `VDS11 + VDS21` with mechanical `LINK` line cutting all phase wires), Safe Zone guard (`[25..405, 12..276]`), 2-column A3 PLC sheet overflow guard (`my=256`), and pre-verified circuit macros (`BUS_3PH_N_PE`, `DOL_3P`, `VFD_3P`, `PSU_24VDC_PELV`).
