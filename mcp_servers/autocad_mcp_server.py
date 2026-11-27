@@ -14,6 +14,7 @@ Runs in the user's Windows Desktop session when spawned by Antigravity Language 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -759,6 +760,10 @@ SECOND_POLE_BLOCK_MAP = {
     "VCR21": "VCR21",
     "VCR22": "VCR22",
     "VMS21P": "VMS21P",
+    "VPB11": "VPB21",
+    "VPB12": "VPB22",
+    "VSW11": "VSW21",
+    "VSW12": "VSW22",
 }
 
 
@@ -1170,12 +1175,20 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
             )
 
     lisp_body = " ".join(lisp_parts) if len(lisp_parts) > 1 else '(princ "No PLC rows")'
-    return _run_acade_lisp_checked(
+    res = _run_acade_lisp_checked(
         lisp_body,
         ["c:wd_insym2", "c:wd_modattrval", "c:wd_wire_quik"],
         auto_save=bool(args.get("auto_save", True)),
         timeout_sec=55.0,
     )
+    res.update({
+        "modules_rendered": len(mod_items),
+        "total_modules": total_modules,
+        "total_pages": total_pages,
+        "page_index": page_index,
+        "has_more_pages": (page_index + 1) < total_pages,
+    })
+    return res
 
 
 def tool_acade_sync_panel_footprints(args: dict[str, Any]) -> dict[str, Any]:
@@ -1775,6 +1788,8 @@ def tool_acade_insert_verified_circuit(args: dict[str, Any]) -> dict[str, Any]:
             ),
         ])
     elif ctype == "STAR_DELTA_3P":
+        # Complete IEC 3-pole Star-Delta motor feeder:
+        # 3P MPCB (-Q*) + 3P Main Contactor contacts (-K*M) + 3P Delta Contactor contacts (-K*D) + 3P Star Contactor contacts (-K*S) + Motor + PE!
         q_tag = str(args.get("mpcb_tag", "-Q1"))
         km_tag = str(args.get("contactor_tag", "-K1M"))
         kd_tag = str(args.get("delta_tag", "-K1D"))
@@ -1782,61 +1797,93 @@ def tool_acade_insert_verified_circuit(args: dict[str, Any]) -> dict[str, Any]:
         m_tag = str(args.get("motor_tag", "-M1"))
         inst = str(args.get("inst", "=CONVEYOR"))
         desc1 = str(args.get("desc1", "STAR-DELTA MOTOR 11KW"))
-        x1, x2, x3 = ox, ox + 13.0, ox + 26.0
-        kd_x = ox + 52.0
-        ks_x = ox + 98.0
-        y1, y2, y3, y_pe = bus_ys[0], bus_ys[1], bus_ys[2], bus_ys[4]
-        y_q, y_km, y_mot = 222.0, 178.0, 125.0
-        y_kd, y_ks = 178.0, 178.0
+        x1, x2, x3, x_pe = x0, x0 + 10.0, x0 + 20.0, x0 + 32.0
+        kd_x = x0 + 44.0
+        ks_x = x0 + 82.0
+        y_q, y_km, m_y = 222.0, 176.0, 82.0
+        y_kd, y_ks = 176.0, 176.0
+
         wires.extend([
-            {"p1": [x1, y1], "p2": [x1, y_mot + 10.0], "layer": "PWR_L1_BK_2.5"},
-            {"p1": [x2, y2], "p2": [x2, y_mot + 10.0], "layer": "PWR_L2_BK_2.5"},
-            {"p1": [x3, y3], "p2": [x3, y_mot + 10.0], "layer": "PWR_L3_BK_2.5"},
-            {"p1": [x3 + 12.0, y_pe], "p2": [x3 + 12.0, y_mot - 10.0], "layer": "PWR_PE_GNYE_2.5"},
-            {"p1": [x3 + 4.0, y_mot - 10.0], "p2": [x3 + 12.0, y_mot - 10.0], "layer": "PWR_PE_GNYE_2.5"},
-            # Delta & Star contactor branches
-            {"p1": [x1, 200.0], "p2": [kd_x, 200.0], "layer": "PWR_L1_BK_2.5"},
-            {"p1": [x2, 196.0], "p2": [kd_x + 13.0, 196.0], "layer": "PWR_L2_BK_2.5"},
-            {"p1": [x3, 192.0], "p2": [kd_x + 26.0, 192.0], "layer": "PWR_L3_BK_2.5"},
-            {"p1": [kd_x, 200.0], "p2": [kd_x, 148.0], "layer": "PWR_L1_BK_2.5"},
-            {"p1": [kd_x + 13.0, 196.0], "p2": [kd_x + 13.0, 148.0], "layer": "PWR_L2_BK_2.5"},
-            {"p1": [kd_x + 26.0, 192.0], "p2": [kd_x + 26.0, 148.0], "layer": "PWR_L3_BK_2.5"},
-            {"p1": [kd_x, 148.0], "p2": [ks_x, 148.0], "layer": "PWR_L1_BK_2.5"},
-            {"p1": [kd_x + 13.0, 152.0], "p2": [ks_x + 13.0, 152.0], "layer": "PWR_L2_BK_2.5"},
-            {"p1": [kd_x + 26.0, 156.0], "p2": [ks_x + 26.0, 156.0], "layer": "PWR_L3_BK_2.5"},
-            {"p1": [ks_x, 192.0], "p2": [ks_x, 148.0], "layer": "PWR_L1_BK_2.5"},
-            {"p1": [ks_x + 13.0, 192.0], "p2": [ks_x + 13.0, 152.0], "layer": "PWR_L2_BK_2.5"},
-            {"p1": [ks_x + 26.0, 192.0], "p2": [ks_x + 26.0, 156.0], "layer": "PWR_L3_BK_2.5"},
-            {"p1": [ks_x, 192.0], "p2": [ks_x + 26.0, 192.0], "layer": "PWR_L1_BK_2.5"},
+            # Main 3-phase vertical drops through MPCB (-Q*) and Main Contactor (-K*M) to VMO13 pins (-6.4,+3.9), (0,+7.5), (+6.4,+3.9)
+            {"p1": [x1, y_l1], "p2": [x1, m_y + 12.0], "layer": "PWR_L1_BK_2.5"},
+            {"p1": [x1, m_y + 12.0], "p2": [x2 - 6.4, m_y + 3.9], "layer": "PWR_L1_BK_2.5"},
+            {"p1": [x2, y_l2], "p2": [x2, m_y + 7.5], "layer": "PWR_L2_BK_2.5"},
+            {"p1": [x3, y_l3], "p2": [x3, m_y + 12.0], "layer": "PWR_L3_BK_2.5"},
+            {"p1": [x3, m_y + 12.0], "p2": [x2 + 6.4, m_y + 3.9], "layer": "PWR_L3_BK_2.5"},
+            # Isolated PE drop to motor bottom PE pin X8TERM04 @ (x2, m_y - 7.5)
+            {"p1": [x_pe, y_pe], "p2": [x_pe, m_y - 14.0], "layer": "PWR_PE_GNYE_2.5"},
+            {"p1": [x_pe, m_y - 14.0], "p2": [x2, m_y - 14.0], "layer": "PWR_PE_GNYE_2.5"},
+            {"p1": [x2, m_y - 14.0], "p2": [x2, m_y - 7.5], "layer": "PWR_PE_GNYE_2.5"},
+            # Delta branch taps below MPCB (Y=202, 198, 194) -> 3P Delta Contactor VCR21 @ y_kd=176 -> Winding 2 bus (Y=146, 141, 136)
+            {"p1": [x1, 202.0], "p2": [kd_x, 202.0], "layer": "PWR_L1_BK_2.5"},
+            {"p1": [x2, 198.0], "p2": [kd_x + 10.0, 198.0], "layer": "PWR_L2_BK_2.5"},
+            {"p1": [x3, 194.0], "p2": [kd_x + 20.0, 194.0], "layer": "PWR_L3_BK_2.5"},
+            {"p1": [kd_x, 202.0], "p2": [kd_x, 146.0], "layer": "PWR_L1_BK_2.5"},
+            {"p1": [kd_x + 10.0, 198.0], "p2": [kd_x + 10.0, 141.0], "layer": "PWR_L2_BK_2.5"},
+            {"p1": [kd_x + 20.0, 194.0], "p2": [kd_x + 20.0, 136.0], "layer": "PWR_L3_BK_2.5"},
+            # Winding 2 horizontal links from Delta bottom to Star bottom (isolated from live phases until K_Delta or K_Star closes!)
+            {"p1": [kd_x, 146.0], "p2": [ks_x, 146.0], "layer": "PWR_L1_BK_2.5"},
+            {"p1": [kd_x + 10.0, 141.0], "p2": [ks_x + 10.0, 141.0], "layer": "PWR_L2_BK_2.5"},
+            {"p1": [kd_x + 20.0, 136.0], "p2": [ks_x + 20.0, 136.0], "layer": "PWR_L3_BK_2.5"},
+            # 3P Star Contactor VCR21 @ y_ks=176 (X2TERM01..03 @ Y≈181..183.5, X8TERM02..06 @ Y≈168.5..171):
+            # Split top Star-point segments cleanly ABOVE VCR21 (Y=186..196) and bottom Winding-2 drops BELOW VCR21 (Y=166..146/141/136)
+            # so even before symbol wire-trimming, the Star shorting bridge at Y=196 NEVER shorts L1-L2-L3 on the Delta/Supply side!
+            {"p1": [ks_x, 196.0], "p2": [ks_x, 181.0], "layer": "SIG_PLC_BU_0.5"},
+            {"p1": [ks_x + 10.0, 196.0], "p2": [ks_x + 10.0, 181.0], "layer": "SIG_PLC_BU_0.5"},
+            {"p1": [ks_x + 20.0, 196.0], "p2": [ks_x + 20.0, 181.0], "layer": "SIG_PLC_BU_0.5"},
+            {"p1": [ks_x, 196.0], "p2": [ks_x + 20.0, 196.0], "layer": "SIG_PLC_BU_0.5"},
+            {"p1": [ks_x, 171.0], "p2": [ks_x, 146.0], "layer": "PWR_L1_BK_2.5"},
+            {"p1": [ks_x + 10.0, 171.0], "p2": [ks_x + 10.0, 141.0], "layer": "PWR_L2_BK_2.5"},
+            {"p1": [ks_x + 20.0, 171.0], "p2": [ks_x + 20.0, 136.0], "layer": "PWR_L3_BK_2.5"},
         ])
-        dots.extend([[x1, y1], [x2, y2], [x3, y3], [x3 + 12.0, y_pe], [x1, 200.0], [x2, 196.0], [x3, 192.0], [ks_x + 13.0, 192.0]])
+        dots.extend([[x1, y_l1], [x2, y_l2], [x3, y_l3], [x_pe, y_pe], [x1, 202.0], [x2, 198.0], [x3, 194.0], [ks_x + 10.0, 196.0]])
         sym_lisps.extend([
-            _build_symbol_lisp("VCB11Q13", [x1, y_q], {"TAG1": q_tag, "MFG": "SIEMENS", "CAT": "3RV2021-4DA10", "LOC": "+MAIN_PNL", "INST": inst, "DESC1": "MPCB 3P"}, poles=3, pole_spacing=13.0),
-            _build_symbol_lisp("VCR1", [x1, y_km], {"TAG1": km_tag, "MFG": "SIEMENS", "CAT": "3RT2026-1BB40", "LOC": "+MAIN_PNL", "INST": inst, "DESC1": "MAIN CONTACTOR"}, poles=3, pole_spacing=13.0),
-            _build_symbol_lisp("VCR1", [kd_x, y_kd], {"TAG1": kd_tag, "MFG": "SIEMENS", "CAT": "3RT2026-1BB40", "LOC": "+MAIN_PNL", "INST": inst, "DESC1": "DELTA CONTACTOR"}, poles=3, pole_spacing=13.0),
-            _build_symbol_lisp("VCR1", [ks_x, y_ks], {"TAG1": ks_tag, "MFG": "SIEMENS", "CAT": "3RT2026-1BB40", "LOC": "+MAIN_PNL", "INST": inst, "DESC1": "STAR CONTACTOR"}, poles=3, pole_spacing=13.0),
-            _build_symbol_lisp("VMO13", [x2, y_mot], {"TAG1": m_tag, "MFG": "SIEMENS", "CAT": "1LE1001-1CB23", "LOC": "+FIELD", "INST": inst, "DESC1": desc1}),
+            _build_symbol_lisp("VCB11Q13", [x1, y_q], {"TAG1": q_tag, "MFG": "SIEMENS", "CAT": str(args.get("mpcb_cat", "3RV2021-4DA10")), "LOC": "+MAIN_PNL", "INST": inst, "DESC1": f"MPCB {m_tag}"}, poles=3, pole_spacing=10.0),
+            _build_symbol_lisp("VCR21", [x1, y_km], {"TAG2": km_tag, "LOC": "+MAIN_PNL", "INST": inst, "DESC1": f"MAIN CONTACTS {km_tag}"}, poles=3, pole_spacing=10.0),
+            _build_symbol_lisp("VCR21", [kd_x, y_kd], {"TAG2": kd_tag, "LOC": "+MAIN_PNL", "INST": inst, "DESC1": f"DELTA CONTACTS {kd_tag}"}, poles=3, pole_spacing=10.0),
+            _build_symbol_lisp("VCR21", [ks_x, y_ks], {"TAG2": ks_tag, "LOC": "+MAIN_PNL", "INST": inst, "DESC1": f"STAR CONTACTS {ks_tag}"}, poles=3, pole_spacing=10.0),
+            _build_symbol_lisp("VMO13", [x2, m_y], {"TAG1": m_tag, "MFG": "SIEMENS", "CAT": str(args.get("motor_cat", "1LE1001-1CB23")), "LOC": "+FIELD", "INST": inst, "DESC1": desc1}),
+            # Mechanical interlock line on LINK layer between Delta and Star contactors
+            f'(entmake (list \'(0 . "LINE") \'(8 . "LINK") (list 10 {kd_x + 20.0} {y_kd} 0.0) (list 11 {ks_x} {y_ks} 0.0)))',
         ])
     elif ctype == "SAFETY_3SK1_2CH":
-        s_tag = str(args.get("estop_tag", "-S0"))
-        k_tag = str(args.get("safety_tag", "-K0"))
+        # Complete ISO 13849-1 Category 4 / PLe Dual-Channel Safety Relay (VK1_SAFE 3SK1 + 2-Channel E-Stop VPB12/VPB22)
+        s_tag = str(args.get("estop_tag", "-S10"))
+        k_tag = str(args.get("safety_tag", "-K_SAF1"))
         inst = str(args.get("inst", "=SAFETY"))
-        x_ch1, x_ch2, x_out = ox, ox + 22.0, ox + 52.0
+        k_x, k_y = x0, 125.0  # VK1_SAFE (w=56, h=50): top @ Y=180 (+8 A1, +20 S12, +34 S22, +48 13); bot @ Y=120 (+8 A2, +20 S11, +34 S21, +48 14); right @ X=k_x+61 (Y1=+34, Y2=+18)
+        x_a1, x_ch1, x_ch2, x_en = k_x + 8.0, k_x + 20.0, k_x + 34.0, k_x + 48.0
         wires.extend([
-            {"p1": [x_ch1, 250.0], "p2": [x_ch1, 165.0], "layer": "SAFE_24VDC_YE_0.75"},
-            {"p1": [x_ch2, 250.0], "p2": [x_ch2, 165.0], "layer": "SAFE_24VDC_YE_0.75"},
-            {"p1": [x_ch1, 165.0], "p2": [x_ch1, 120.0], "layer": "CTRL_0VDC_BUWH_0.75"},
-            {"p1": [x_out, 250.0], "p2": [x_out, 145.0], "layer": "CTRL_24VDC_DBU_0.75"},
+            # +24VDC supply to A1 and Enable Contact 13
+            {"p1": [x_a1, 250.0], "p2": [x_a1, k_y + 55.0], "layer": "CTRL_24VDC_DBU_0.75"},
+            {"p1": [x_en, 250.0], "p2": [x_en, k_y + 55.0], "layer": "CTRL_24VDC_DBU_0.75"},
+            # Dual-channel E-Stop loops: S11 (bottom) -> E-Stop Ch1 -> S12 (top), and S21 (bottom) -> E-Stop Ch2 -> S22 (top)
+            {"p1": [x_ch1, 242.0], "p2": [x_ch1, k_y + 55.0], "layer": "SAFE_24VDC_YE_0.75"},
+            {"p1": [x_ch2, 242.0], "p2": [x_ch2, k_y + 55.0], "layer": "SAFE_24VDC_YE_0.75"},
+            {"p1": [x_ch1, k_y - 5.0], "p2": [x_ch1, 106.0], "layer": "SAFE_24VDC_YE_0.75"},
+            {"p1": [x_ch1, 106.0], "p2": [k_x - 8.0, 106.0], "layer": "SAFE_24VDC_YE_0.75"},
+            {"p1": [k_x - 8.0, 106.0], "p2": [k_x - 8.0, 242.0], "layer": "SAFE_24VDC_YE_0.75"},
+            {"p1": [k_x - 8.0, 242.0], "p2": [x_ch1, 242.0], "layer": "SAFE_24VDC_YE_0.75"},
+            {"p1": [x_ch2, k_y - 5.0], "p2": [x_ch2, 98.0], "layer": "SAFE_24VDC_YE_0.75"},
+            {"p1": [x_ch2, 98.0], "p2": [k_x + 68.0, 98.0], "layer": "SAFE_24VDC_YE_0.75"},
+            {"p1": [k_x + 68.0, 98.0], "p2": [k_x + 68.0, 242.0], "layer": "SAFE_24VDC_YE_0.75"},
+            {"p1": [k_x + 68.0, 242.0], "p2": [x_ch2, 242.0], "layer": "SAFE_24VDC_YE_0.75"},
+            # 0VDC return from A2 + Safe 24VDC Enable Output from 14 + Feedback Loop Y1-Y2
+            {"p1": [x_a1, k_y - 5.0], "p2": [x_a1, 86.0], "layer": "CTRL_0VDC_BUWH_0.75"},
+            {"p1": [x_en, k_y - 5.0], "p2": [x_en, 86.0], "layer": "SAFE_24VDC_YE_0.75"},
+            {"p1": [k_x + 61.0, k_y + 34.0], "p2": [k_x + 65.0, k_y + 34.0], "layer": "SAFE_24VDC_YE_0.75"},
+            {"p1": [k_x + 65.0, k_y + 34.0], "p2": [k_x + 65.0, k_y + 18.0], "layer": "SAFE_24VDC_YE_0.75"},
+            {"p1": [k_x + 65.0, k_y + 18.0], "p2": [k_x + 61.0, k_y + 18.0], "layer": "SAFE_24VDC_YE_0.75"},
         ])
         arrows.extend([
-            {"kind": "destination", "point": [x_ch1, 250.0], "sigcode": "BUS_24VDC_PELV", "wireno": "+24VDC"},
-            {"kind": "destination", "point": [x_ch2, 250.0], "sigcode": "BUS_24VDC_PELV", "wireno": "+24VDC"},
-            {"kind": "destination", "point": [x_ch1, 120.0], "sigcode": "BUS_0VDC_PELV", "wireno": "0VDC"},
-            {"kind": "source", "point": [x_out, 145.0], "sigcode": "SAFE_24VDC_EN", "wireno": "+24V_SAFE"},
+            {"kind": "destination", "point": [x_a1, 250.0], "sigcode": "BUS_24VDC_PELV", "wireno": "+24VDC"},
+            {"kind": "destination", "point": [x_en, 250.0], "sigcode": "BUS_24VDC_PELV", "wireno": "+24VDC"},
+            {"kind": "destination", "point": [x_a1, 86.0], "sigcode": "BUS_0VDC_PELV", "wireno": "0VDC"},
+            {"kind": "source", "point": [x_en, 86.0], "sigcode": "SAFE_24VDC_EN", "wireno": "+24V_SAFE"},
         ])
         sym_lisps.extend([
-            _build_symbol_lisp("VPB12", [x_ch1, 220.0], {"TAG1": s_tag, "MFG": "SIEMENS", "CAT": "3SU1150-1HB20-1CG0", "LOC": "+DOOR", "INST": inst, "DESC1": "E-STOP 2CH NC"}, poles=2, pole_spacing=22.0),
-            _build_symbol_lisp("VCR1", [x_ch1, 165.0], {"TAG1": k_tag, "MFG": "SIEMENS", "CAT": "3SK1111-1AB30", "LOC": "+MAIN_PNL", "INST": inst, "DESC1": "SAFETY RELAY 3SK1"}, poles=2, pole_spacing=52.0),
+            _build_symbol_lisp("VPB12", [x_ch1, 212.0], {"TAG1": s_tag, "MFG": "SIEMENS", "CAT": "3SU1150-1HB20-1CG0", "LOC": "+DOOR", "INST": inst, "DESC1": "E-STOP 2CH NC"}, poles=2, pole_spacing=14.0),
+            _build_symbol_lisp("VK1_SAFE", [k_x, k_y], {"TAG1": k_tag, "MFG": "SIEMENS", "CAT": "3SK1111-1AB30", "LOC": "+MAIN_PNL", "INST": inst, "DESC1": "SAFETY RELAY 3SK1"}),
         ])
     else:
         raise ValueError(f"Unsupported circuit_type '{ctype}'. Choose from: BUS_3PH_N_PE, DOL_3P, VFD_3P, PSU_24VDC_PELV, STAR_DELTA_3P, SAFETY_3SK1_2CH.")
@@ -1848,7 +1895,7 @@ def tool_acade_insert_verified_circuit(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def tool_acade_electrical_audit(args: dict[str, Any]) -> dict[str, Any]:
-    """Run Fail-Closed Database + DWG Gatekeeper v3.1 audit on Project Scratch .mdb and optional project_dir."""
+    """Run Fail-Closed Database + DWG Gatekeeper v3.2 audit on Project Scratch .mdb and optional project_dir."""
     mdb_path = Path(args["mdb_path"]).resolve()
     cmd = [sys.executable, str(AUDIT_SCRIPT), "--mdb", str(mdb_path)]
     if args.get("project_dir"):
@@ -2009,6 +2056,10 @@ TOOLS = [
                 "mpcb_tag": {"type": "string"},
                 "mcb_tag": {"type": "string"},
                 "contactor_tag": {"type": "string"},
+                "delta_tag": {"type": "string"},
+                "star_tag": {"type": "string"},
+                "estop_tag": {"type": "string"},
+                "safety_tag": {"type": "string"},
                 "vfd_tag": {"type": "string"},
                 "psu_tag": {"type": "string"},
                 "motor_tag": {"type": "string"},
@@ -2105,7 +2156,7 @@ TOOLS = [
     },
     {
         "name": "acade_electrical_audit",
-        "description": "Gatekeeper v3.1 audit on ACADE Project Scratch .mdb and .dwg sheets (Netlist DRC, PINLIST overuse/dup pins, cross-sheet SIGCODE, duplicate terminals, Title Block, Panel Layout).",
+        "description": "Gatekeeper v3.2 audit on ACADE Project Scratch .mdb and .dwg sheets (Netlist DRC, PINLIST quota & dup pins, cross-sheet SIGCODE domain DRC, duplicate terminals, Title Block, Panel Layout).",
         "inputSchema": {
             "type": "object",
             "properties": {

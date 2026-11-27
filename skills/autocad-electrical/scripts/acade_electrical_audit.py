@@ -1,4 +1,4 @@
-"""AutoCAD Electrical Scratch DB (.mdb) + Electrical Netlist DRC & Layout Gatekeeper v3.0 (Fail-Closed).
+"""AutoCAD Electrical Scratch DB (.mdb) + Electrical Netlist DRC & Layout Gatekeeper v3.2 (Fail-Closed).
 
 Performs BOTH relational Access .mdb verification (via 64-bit ODBC) AND headless geometric +
 electrical netlist Design Rule Checking (DRC) across every project .dwg via accoreconsole.exe.
@@ -17,12 +17,16 @@ Fails closed (passed=False, exit code 2) if ANY metric > 0:
 7. wires_piercing_symbols & open_circuit_loads
 8. text_or_attr_overflows: Visible schematic text/attributes overflowing outside [20..415, 5..287] frame or intruding into Title Block
 9. panel_layout_violations: Footprints placed on wrong layer (DIM / 0)
+10. pinlist_overuse_or_dup_pins: Duplicate child contact pins OR child contact count exceeding catalog PINLIST quota!
+11. cross_sheet_sigcode_mismatch: Orphaned Source/Dest arrows, mismatched wire numbers, OR cross-sheet voltage domain shorts (e.g., +24VDC arrow linked to 0VDC/PE/AC)!
+12. duplicate_terminal_numbers: Duplicate terminal numbers on the same strip (INST+LOC+TAGSTRIP)
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import csv
 import json
 import math
 import subprocess
@@ -31,6 +35,23 @@ from pathlib import Path
 from typing import Any
 
 ACCORE = Path(r"C:\Program Files\Autodesk\AutoCAD 2027\accoreconsole.exe")
+CATALOG_SEED_CSV = Path(__file__).resolve().parent.parent / "templates" / "catalog_master_seed.csv"
+
+
+def _load_catalog_max_contacts() -> dict[tuple[str, str], int]:
+    """Load total contact-pair quota per (MFG, CAT) from catalog_master_seed.csv PINLIST."""
+    quotas: dict[tuple[str, str], int] = {}
+    if not CATALOG_SEED_CSV.exists():
+        return quotas
+    with CATALOG_SEED_CSV.open("r", encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            mfg = (row.get("MFG") or "").strip().upper()
+            cat = (row.get("CAT") or "").strip().upper()
+            plist = (row.get("PINLIST") or "").strip()
+            if mfg and cat and plist:
+                groups = [g.strip() for g in plist.split(";") if g.strip()]
+                quotas[(mfg, cat)] = len(groups)
+    return quotas
 
 
 def _classify_wire_domain(layer_name: str) -> str:
@@ -175,7 +196,7 @@ def _analyze_sheet_netlist_drc(
 
 
 def _audit_dwgs_headless(dwg_paths: list[Path]) -> dict[str, list[dict[str, Any]]]:
-    """Run headless accoreconsole.exe inspection + Netlist DRC across all project .dwg files."""
+    """Run headless accoreconsole.exe inspection + Netlist DRC + Cross-Sheet SIGCODE Domain DRC across all project .dwg files."""
     findings: dict[str, list[dict[str, Any]]] = {
         "family_block_misuse_dwg": [],
         "modelspace_titleblock_violations": [],
@@ -186,6 +207,7 @@ def _audit_dwgs_headless(dwg_paths: list[Path]) -> dict[str, list[dict[str, Any]
         "open_circuit_loads": [],
         "text_or_attr_overflows": [],
         "panel_layout_violations": [],
+        "cross_sheet_sigcode_dwg": [],
     }
     if not dwg_paths or not ACCORE.exists():
         return findings
@@ -193,6 +215,7 @@ def _audit_dwgs_headless(dwg_paths: list[Path]) -> dict[str, list[dict[str, Any]
     tmp_dir = Path(tempfile.gettempdir())
     scr_path = tmp_dir / "acade_gatekeeper_v3.scr"
     out_path = tmp_dir / "acade_gatekeeper_v3_out.txt"
+    sig_Registry: dict[str, dict[str, Any]] = {}
 
     for idx0, dp in enumerate(dwg_paths):
         if not dp.exists():
@@ -211,7 +234,7 @@ def _audit_dwgs_headless(dwg_paths: list[Path]) -> dict[str, list[dict[str, Any]
   (setq _i 0)
   (while (< _i (sslength _ss))
     (setq _en (ssname _ss _i) _ed (entget _en) _bn (strcase (cdr (assoc 2 _ed))) _la (strcase (cdr (assoc 8 _ed))) _sp (cdr (assoc 410 _ed)) _ip (cdr (assoc 10 _ed)))
-    (setq _an (entnext _en) _tg "" _ptg "" _prj "" _dno "" _sh "" _shmax "" _p2 nil _p8 nil _p4 nil _p1 nil _p0 nil)
+    (setq _an (entnext _en) _tg "" _ptg "" _prj "" _dno "" _sh "" _shmax "" _sig "" _wno "" _p2 nil _p8 nil _p4 nil _p1 nil _p0 nil)
     (while (and _an (= (cdr (assoc 0 (entget _an))) "ATTRIB"))
       (setq _ad (entget _an) _ak (strcase (cdr (assoc 2 _ad))) _av (cdr (assoc 1 _ad)) _ap (cdr (assoc 10 _ad)) _fl (cdr (assoc 70 _ad)))
       (if (and (= _sp "Model") (= (logand _fl 1) 0) (/= _av "") (/= _bn "TITLE_BLOCK_A3_BILINGUAL"))
@@ -223,6 +246,8 @@ def _audit_dwgs_headless(dwg_paths: list[Path]) -> dict[str, list[dict[str, Any]
         ((= _ak "DWG_NO") (setq _dno _av))
         ((= _ak "SHEET") (setq _sh _av))
         ((= _ak "SHEET_TOTAL") (setq _shmax _av))
+        ((= _ak "SIGCODE") (setq _sig _av))
+        ((= _ak "WIRENO") (setq _wno _av))
         ((wcmatch _ak "X2TERM*") (setq _p2 (cons _ap _p2)))
         ((wcmatch _ak "X8TERM*") (setq _p8 (cons _ap _p8)))
         ((wcmatch _ak "X4TERM*") (setq _p4 (cons _ap _p4)))
@@ -233,6 +258,8 @@ def _audit_dwgs_headless(dwg_paths: list[Path]) -> dict[str, list[dict[str, Any]
     )
     (if (= _bn "WD_M") (write-line (strcat "WDM|" _sp "|" _sh) _f))
     (if (= _bn "TITLE_BLOCK_A3_BILINGUAL") (write-line (strcat "TB|" _sp "|" _prj "|" _dno "|" _sh "|" _shmax) _f))
+    (if (and (wcmatch _bn "HA1S*,HA1D*,VA1S*,VA1D*") (/= _sig ""))
+      (write-line (strcat "SIGARR|" _bn "|" _sig "|" _wno "|" (rtos (car _ip) 2 2) "|" (rtos (cadr _ip) 2 2)) _f))
     (if (wcmatch _bn "HT0*,VT0*") (write-line (strcat "PTERM|" _bn "|" (rtos (car _ip) 2 2) "|" (rtos (cadr _ip) 2 2)) _f))
     (if (= _bn "VMO13")
       (progn
@@ -301,6 +328,7 @@ _QUIT _Y
         sheet_wires: list[tuple[str, float, float, float, float]] = []
         pass_terms: list[tuple[str, float, float]] = []
         mpin_groups: dict[tuple[str, str], list[tuple[float, float]]] = {}
+        sheet_arrows: list[tuple[str, str, str, float, float]] = []
         has_paper_tb = False
 
         for ln in lines:
@@ -340,6 +368,8 @@ _QUIT _Y
                 sheet_wires.append((parts[1], float(parts[2]), float(parts[3]), float(parts[4]), float(parts[5])))
             elif kind == "PTERM" and len(parts) >= 4:
                 pass_terms.append((parts[1], float(parts[2]), float(parts[3])))
+            elif kind == "SIGARR" and len(parts) >= 6:
+                sheet_arrows.append((parts[1].strip(), parts[2].strip(), parts[3].strip(), float(parts[4]), float(parts[5])))
             elif kind == "MPIN" and len(parts) >= 5:
                 mpin_groups.setdefault((parts[1], parts[2]), []).append((float(parts[3]), float(parts[4])))
             elif kind == "VISATT" and len(parts) >= 6 and not is_panel_sheet:
@@ -390,6 +420,33 @@ _QUIT _Y
             sh_shorts, sh_unprot = _analyze_sheet_netlist_drc(dp.name, sheet_wires, pass_terms, motor_vfd_list)
             findings["short_circuit_nets"].extend(sh_shorts)
             findings["unprotected_3phase_poles"].extend(sh_unprot)
+            for abn, scode, swno, ax, ay in sheet_arrows:
+                entry = sig_Registry.setdefault(scode.upper(), {"sigcode": scode, "src": 0, "dst": 0, "wirenos": set(), "domains": set(), "dwgs": set()})
+                if "S" in abn[3:5]:
+                    entry["src"] += 1
+                else:
+                    entry["dst"] += 1
+                if swno:
+                    entry["wirenos"].add(swno.upper())
+                entry["dwgs"].add(dp.name)
+                for wlyr, wx1, wy1, wx2, wy2 in sheet_wires:
+                    if math.hypot(wx1 - ax, wy1 - ay) <= 3.0 or math.hypot(wx2 - ax, wy2 - ay) <= 3.0:
+                        dom = _classify_wire_domain(wlyr)
+                        if dom != "OTHER":
+                            entry["domains"].add(dom)
+
+    for _sk, sv in sig_Registry.items():
+        doms = sv["domains"]
+        bad_dom = len(doms) > 1 and not (doms <= {"DC_24V", "SIG"})
+        if (len(dwg_paths) > 1 and (sv["src"] == 0 or sv["dst"] == 0)) or len(sv["wirenos"]) > 1 or bad_dom:
+            findings["cross_sheet_sigcode_dwg"].append({
+                "SIGCODE": sv["sigcode"],
+                "SRC": sv["src"],
+                "DST": sv["dst"],
+                "WIRENOS": sorted(sv["wirenos"]),
+                "DOMAINS": sorted(doms),
+                "DWGS": sorted(sv["dwgs"]),
+            })
 
     scr_path.unlink(missing_ok=True)
     out_path.unlink(missing_ok=True)
@@ -468,7 +525,14 @@ if ($compTotal -eq 0) {{
     exit 0
 }}
 
-$compCols = @($conn.GetSchema("Columns", @($null, $null, "COMP", $null)) | Select-Object -ExpandProperty COLUMN_NAME)
+$compCols = @()
+try {{
+    $scCmd = $conn.CreateCommand()
+    $scCmd.CommandText = "SELECT TOP 1 * FROM [COMP]"
+    $scRdr = $scCmd.ExecuteReader()
+    for ($ci = 0; $ci -lt $scRdr.FieldCount; $ci++) {{ $compCols += $scRdr.GetName($ci).ToUpper() }}
+    $scRdr.Close()
+}} catch {{}}
 $symCol = if ($compCols -contains "SYMBOL") {{ "SYMBOL" }} elseif ($compCols -contains "BLOCK") {{ "BLOCK" }} else {{ "" }}
 
 $missingCat = Run-Query "SELECT TAGNAME, DWGIX, LOC, INST, PAR1_CHLD2 FROM [COMP] WHERE PAR1_CHLD2='1' AND ((MFG IS NULL OR MFG='') OR (CAT IS NULL OR CAT=''))"
@@ -515,12 +579,22 @@ if ($tables -contains "TERMS") {{
 }}
 
 $pinViolations = @()
+$childCounts = @()
+$parentCats = @()
 if ($tables -contains "COMP") {{
     try {{
-        $compPins = Run-Query "SELECT TAGNAME, PAR1_CHLD2, TERM01, TERM02, CAT FROM [COMP] WHERE TAGNAME IS NOT NULL AND TAGNAME<>''"
+        $compPins = Run-Query "SELECT TAGNAME, PAR1_CHLD2, TERM01, TERM02, MFG, CAT FROM [COMP] WHERE TAGNAME IS NOT NULL AND TAGNAME<>''"
         $seenPins = @{{}}
+        $chCntMap = @{{}}
         foreach ($cp in $compPins) {{
             $tg = [string]$cp.TAGNAME
+            $pc = ([string]$cp.PAR1_CHLD2).Trim()
+            if ($pc -eq "1") {{
+                $parentCats += @{{ TAGNAME = $tg; MFG = ([string]$cp.MFG).Trim().ToUpper(); CAT = ([string]$cp.CAT).Trim().ToUpper() }}
+            }} elseif ($pc -eq "2") {{
+                if (-not $chCntMap.ContainsKey($tg)) {{ $chCntMap[$tg] = 0 }}
+                $chCntMap[$tg]++
+            }}
             $t1 = ([string]$cp.TERM01).Trim()
             $t2 = ([string]$cp.TERM02).Trim()
             if ($t1 -ne "" -or $t2 -ne "") {{
@@ -531,6 +605,9 @@ if ($tables -contains "COMP") {{
                     $seenPins[$pk] = $true
                 }}
             }}
+        }}
+        foreach ($k in $chCntMap.Keys) {{
+            $childCounts += @{{ TAGNAME = $k; CHILD_COUNT = $chCntMap[$k] }}
         }}
     }} catch {{}}
 }}
@@ -570,6 +647,8 @@ $conn.Close()
     wire_errors = $wireErrs
     schematic_vs_panel_discrepancy = $panelDiscrepancies
     pinlist_overuse_or_dup_pins = $pinViolations
+    child_counts = $childCounts
+    parent_cats = $parentCats
     cross_sheet_sigcode_mismatch = $sigMismatches
     duplicate_terminal_numbers = $dupTermNums
     filetime_rows = $fileRows
@@ -607,11 +686,39 @@ $conn.Close()
         "open_circuit_loads": [],
         "text_or_attr_overflows": [],
         "panel_layout_violations": [],
+        "cross_sheet_sigcode_dwg": [],
     }
 
     fam_misuse = list(raw.get("family_block_misuse") or [])
     if not fam_misuse and dwg_findings["family_block_misuse_dwg"]:
         fam_misuse = dwg_findings["family_block_misuse_dwg"]
+
+    # Check _PINLIST quota overuse (CHILD_COUNT > catalog PINLIST contact pairs) + duplicate contact pins
+    pin_issues = list(raw.get("pinlist_overuse_or_dup_pins") or [])
+    quotas = _load_catalog_max_contacts()
+    parent_cat_map = {
+        str(p.get("TAGNAME", "")): (str(p.get("MFG", "")), str(p.get("CAT", "")))
+        for p in (raw.get("parent_cats") or [])
+    }
+    for cc in (raw.get("child_counts") or []):
+        tg = str(cc.get("TAGNAME", ""))
+        cnt = int(cc.get("CHILD_COUNT", 0))
+        mfg_cat = parent_cat_map.get(tg)
+        if mfg_cat and mfg_cat in quotas and cnt > quotas[mfg_cat]:
+            pin_issues.append({
+                "TAGNAME": tg,
+                "MFG": mfg_cat[0],
+                "CAT": mfg_cat[1],
+                "CHILD_COUNT": cnt,
+                "MAX_ALLOWED": quotas[mfg_cat],
+                "REASON": "PINLIST_QUOTA_EXCEEDED",
+            })
+
+    sig_issues = list(raw.get("cross_sheet_sigcode_mismatch") or [])
+    seen_sigs = {str(s.get("SIGCODE", "")).upper() for s in sig_issues}
+    for dsig in dwg_findings.get("cross_sheet_sigcode_dwg", []):
+        if str(dsig.get("SIGCODE", "")).upper() not in seen_sigs:
+            sig_issues.append(dsig)
 
     check_keys = (
         "missing_catalog",
@@ -642,8 +749,8 @@ $conn.Close()
         "wire_errors": len(raw["wire_errors"]),
         "schematic_vs_panel_discrepancy": len(raw["schematic_vs_panel_discrepancy"]),
         "family_block_misuse": len(fam_misuse),
-        "pinlist_overuse_or_dup_pins": len(raw.get("pinlist_overuse_or_dup_pins") or []),
-        "cross_sheet_sigcode_mismatch": len(raw.get("cross_sheet_sigcode_mismatch") or []),
+        "pinlist_overuse_or_dup_pins": len(pin_issues),
+        "cross_sheet_sigcode_mismatch": len(sig_issues),
         "duplicate_terminal_numbers": len(raw.get("duplicate_terminal_numbers") or []),
         "modelspace_titleblock_violations": len(dwg_findings["modelspace_titleblock_violations"]),
         "unupdated_titleblocks": len(dwg_findings["unupdated_titleblocks"]),
@@ -668,8 +775,8 @@ $conn.Close()
             "wire_errors": raw["wire_errors"][:10],
             "schematic_vs_panel_discrepancy": raw["schematic_vs_panel_discrepancy"][:10],
             "family_block_misuse": fam_misuse[:10],
-            "pinlist_overuse_or_dup_pins": (raw.get("pinlist_overuse_or_dup_pins") or [])[:10],
-            "cross_sheet_sigcode_mismatch": (raw.get("cross_sheet_sigcode_mismatch") or [])[:10],
+            "pinlist_overuse_or_dup_pins": pin_issues[:10],
+            "cross_sheet_sigcode_mismatch": sig_issues[:10],
             "duplicate_terminal_numbers": (raw.get("duplicate_terminal_numbers") or [])[:10],
             "modelspace_titleblock_violations": dwg_findings["modelspace_titleblock_violations"][:10],
             "unupdated_titleblocks": dwg_findings["unupdated_titleblocks"][:10],
@@ -684,7 +791,7 @@ $conn.Close()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="ACADE Scratch DB + Electrical Netlist DRC & Layout Gatekeeper v3.1 (Fail-Closed)")
+    parser = argparse.ArgumentParser(description="ACADE Scratch DB + Electrical Netlist DRC & Layout Gatekeeper v3.2 (Fail-Closed)")
     parser.add_argument("--mdb", type=Path, required=True, help="Path to <project>.mdb Scratch Database")
     parser.add_argument("--project-dir", type=Path, default=None, help="Optional project folder or 01_Drawings folder for DWG DRC")
     args = parser.parse_args()

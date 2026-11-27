@@ -127,7 +127,11 @@ def seed_catalog_mdb(cat_mdb: Path, seed_csv: Path) -> dict[str, int]:
         wdblknam = (row.get("WDBLKNAM", "") or "").strip()
         web = (row.get("WEB", "") or "").strip()
         desc = (row.get("DESCRIPTION", "") or "").strip()
-        rating = " ".join(filter(None, [row.get("RATING1", ""), row.get("RATING2", ""), row.get("RATING3", "")])).strip()
+        rating1 = (row.get("RATING1", "") or "").strip()
+        rating2 = (row.get("RATING2", "") or "").strip()
+        rating3 = (row.get("RATING3", "") or "").strip()
+        rating4 = (row.get("RATING4", "") or "").strip()
+        rating = " ".join(filter(None, [rating1, rating2, rating3])).strip()
 
         if not cat or not mfg:
             continue
@@ -138,6 +142,13 @@ def seed_catalog_mdb(cat_mdb: Path, seed_csv: Path) -> dict[str, int]:
             "MANUFACTURER": mfg,
             "DESCRIPTION": desc,
             "RATING": rating,
+            "RATING1": rating1,
+            "RATING2": rating2,
+            "RATING3": rating3,
+            "RATING4": rating4,
+            "USER1": rating1,
+            "USER2": rating2,
+            "USER3": rating3,
             "COILPINS": coilpins,
             "ASSEMBLYCODE": assy,
             "WDBLKNAM": wdblknam,
@@ -174,7 +185,7 @@ foreach ($r in $rows) {{
 
   $cols = @()
   $vals = @()
-  foreach ($c in @('CATALOG','MANUFACTURER','DESCRIPTION','RATING','COILPINS','ASSEMBLYCODE','WDBLKNAM','WEBLINK')) {{
+  foreach ($c in @('CATALOG','MANUFACTURER','DESCRIPTION','RATING','RATING1','RATING2','RATING3','RATING4','USER1','USER2','USER3','COILPINS','ASSEMBLYCODE','WDBLKNAM','WEBLINK')) {{
     if ($avail -contains $c) {{
       $cols += $c
       $v = [string]$r.$c
@@ -365,7 +376,7 @@ $conn.Close()
 
 
 def build_custom_iec_schematic_symbols(iec_dir: Path) -> list[str]:
-    """Compile dedicated ACADE schematic symbols (VG1_PSU_24V, VU1_VFD_3P, VA4_NET_BOX) into Libs\\iec-60617\\."""
+    """Compile dedicated ACADE schematic symbols (VG1_PSU_24V, VU1_VFD_3P, VA4_NET_BOX, VK1_SAFE) into Libs\\iec-60617\\."""
     import ezdxf
 
     if not iec_dir.exists():
@@ -410,6 +421,19 @@ def build_custom_iec_schematic_symbols(iec_dir: Path) -> list[str]:
             "top": [("01", "+24V", 14.0), ("02", "0V", 30.0)],
             "bot": [("03", "PE", 22.0)],
             "right": [("04", "PN_P1", 30.0), ("05", "PN_P2", 16.0)],
+        },
+        {
+            "name": "VK1_SAFE",
+            "w": 56.0,
+            "h": 50.0,
+            "family": "K",
+            "tag_def": "-K_SAF1",
+            "desc1": "SIRIUS 3SK1 SAFETY RELAY",
+            "mfg": "SIEMENS",
+            "cat": "3SK1111-1AB30",
+            "top": [("01", "A1", 8.0), ("02", "S12", 20.0), ("03", "S22", 34.0), ("04", "13", 48.0)],
+            "bot": [("05", "A2", 8.0), ("06", "S11", 20.0), ("07", "S21", 34.0), ("08", "14", 48.0)],
+            "right": [("09", "Y1", 34.0), ("10", "Y2", 18.0)],
         },
     ]
 

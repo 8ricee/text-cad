@@ -27,7 +27,7 @@ Skill quy chuẩn toàn diện cho **Thiết kế Sơ đồ Nguyên lý Điện*
 7. **Cấm dùng `ezdxf` vẽ Sơ đồ nguyên lý hoặc gõ cứng `BOM`/`Wire List`:** `ezdxf` chỉ dùng cho CAM Busbar DXF (`08_busbar_fabrication`); bảng biểu phải sinh từ `.mdb`.
 8. **Cấm bịa kích thước Footprint hoặc để trống `MFG`/`CAT`:** Footprint phải tồn tại trong `Libs\panel\CUSTOM` hoặc `verified_footprints_catalog.csv` (Fail-Closed).
 9. **Cấm bỏ qua `SPARE` / Dự phòng (20–30%):** Mọi tủ PLC bắt buộc chừa tối thiểu 20% kênh `SPARE` kéo sẵn ra cầu đấu dự phòng, và 1–2 nhánh MCB/feeder dự phòng trên Sơ đồ động lực.
-10. **Cấm xuất bản nếu Gatekeeper `v3.1` (`acade_electrical_audit`) trả về bất kỳ lỗi nào (`passed = false`):** Bắt buộc sửa sạch 17 chỉ số về `0` trước khi bàn giao.
+10. **Cấm xuất bản nếu Gatekeeper `v3.2` (`acade_electrical_audit`) trả về bất kỳ lỗi nào (`passed = false`):** Bắt buộc sửa sạch 17 chỉ số về `0` trước khi bàn giao.
 
 ---
 
@@ -168,12 +168,12 @@ Khi thực hiện thiết kế, tính toán hoặc kiểm tra từng loại tủ
        2. **`acade_insert_schematic_symbol`**: Hỗ trợ **`poles=1|2|3|4`** + `pole_spacing` (ghép tự động cực 1 `Parent` + cực 2..N `Child` kèm nét đứt cơ khí `LINK` cắt đủ cả 3 dây pha `L1,L2,L3`), kiểm tra **Safe Zone `[25..405, 12..276]`** chống tràn chữ, chặn `Child/Parent` & cấm `VCR1`/`HCR1` cho họ `U/G/A`, và tự cắt dây đâm xuyên linh kiện.
        3. **`acade_insert_verified_circuit`**: Dựng sẵn các cụm mạch công nghiệp chuẩn 100% DRC (`BUS_3PH_N_PE`, `DOL_3P`, `VFD_3P`, `PSU_24VDC_PELV`, `STAR_DELTA_3P`, `SAFETY_3SK1_2CH`).
        4. **`acade_draw_smart_wires_and_arrows`**: Vẽ dây thông minh qua `(c:wd_wire_quik)`, chống trùng `WDDOT` và chèn cặp `Source/Destination Signal Arrows` (`HA1S1` / `HA1D3`).
-       5. **`acade_build_plc_from_csv`**: Chèn block `PLCIO` thật (`HP1W--L` + `HP1WA-D`, giới hạn tối đa 2 cột/trang tại `my=256` không tràn khung A3), đổi `V* -> H*` cho nhánh ngang, thêm `ht0001` và khép kín mạch `+24VDC`/`0VDC`.
-       6. **`acade_sync_panel_footprints`**: Truy vấn `+MAIN_PNL` & `+DOOR` từ `.mdb`, chuẩn hóa `MFG`, tự sinh Footprint `1:1 mm` nếu thiếu, ép Layer `PNL_FOOTPRINT` và trả về `Layout ISO_A3` (`TILEMODE=0`).
+       5. **`acade_build_plc_from_csv`**: Chèn block `PLCIO` thật (`HP1W--L` + `HP1WA-D`, phân trang tự động 2 cột/trang qua `page_index` / `slot_filter` tại `my=256` không tràn khung A3, trả về `has_more_pages`), đổi `V* -> H*` cho nhánh ngang, thêm `ht0001` và khép kín mạch `+24VDC`/`0VDC`.
+       6. **`acade_sync_panel_footprints`**: Truy vấn `+MAIN_PNL` & `+DOOR` từ `.mdb`, chuẩn hóa `MFG`, biên dịch Footprint `1:1 mm` từ `verified_footprints_catalog.csv` (**Fail-Closed** nếu mã chưa xác thực), hỗ trợ `enclosure_size` / `placements`, ép Layer `PNL_FOOTPRINT` và trả về `Layout ISO_A3` (`TILEMODE=0`).
        7. **`acade_run_reports_and_retag`**: Đánh số dây nút đẳng thế `%S%N`, đồng bộ `WD_M.SHEET` + `TITLE_BLOCK_A3_BILINGUAL` trong `PaperSpace` trên mọi trang và chạy `_AEREBUILDDB`.
        8. **`acade_place_db_reports_on_drawing`**: Truy vấn Scratch `.mdb` đặt bảng `AcDbTable` động trực tiếp lên `PaperSpace` (`TILEMODE=0`).
        9. **`acade_insert_cable_and_jumper`**: Chèn `Cable Marker` (`VW01`/`VW02`) và cầu đấu `ht0001` kèm XDATA Jumper.
-       10. **`acade_electrical_audit`**: Thực thi **Gatekeeper v3.1 (Electrical Netlist DRC + PINLIST/SIGCODE/Terminal + Layout Gatekeeper)** kiểm toán đồng thời `.mdb` và toàn bộ `.dwg`.
+       10. **`acade_electrical_audit`**: Thực thi **Gatekeeper v3.2 (Electrical Netlist DRC + PINLIST Quota & Dup Pins + Cross-Sheet SIGCODE Domain DRC + Terminal + Layout Gatekeeper)** kiểm toán đồng thời `.mdb` và toàn bộ `.dwg`.
    - **Bắt buộc cấu hình Font TrueType Unicode (`arial.ttf`, `isocpeur.ttf` hoặc `tahoma.ttf`) trên chuẩn `R2018 (UTF-8)`** cho Textstyle `Standard` / `WD_IEC` / `VN_ARIAL` (cấm để `txt.shx` gây lỗi `?` Tiếng Việt).
    - Ánh xạ Title Block bằng mẫu [templates/default_iec_bilingual.wdt](templates/default_iec_bilingual.wdt), chạy **`Title Block Update` (`AEUPDATETITLEBLOCK`)** đồng bộ toàn dự án và xuất gộp bằng **Publish → Plot Project to PDF**.
 
@@ -183,7 +183,7 @@ Khi thực hiện thiết kế, tính toán hoặc kiểm tra từng loại tủ
 
 1. **Quản trị & Nạp tự động Cơ sở dữ liệu (`seed_acade_databases.py` & `AECATALOG`)**:
    - Trước khi dựng mạch, chạy [scripts/seed_acade_databases.py](scripts/seed_acade_databases.py) để nạp tự động dữ liệu `MFG` (viết IN HOA 100%), `CAT`, `_PINLIST` (Form C `4,...`), `ASSYCODE` vào `default_cat.mdb`, ánh xạ Footprint vào `footprint_lookup.mdb`, và mã module Siemens S7-1500/S7-1200 vào `ace_plc.mdb`.
-2. **Gatekeeper Kiểm toán Điện & Bố cục v3.1 Bắt buộc (`acade_electrical_audit` — Fail-Closed nếu vi phạm)**:
+2. **Gatekeeper Kiểm toán Điện & Bố cục v3.2 Bắt buộc (`acade_electrical_audit` — Fail-Closed nếu vi phạm)**:
    - Cuối mọi dự án, bắt buộc chạy `acade_electrical_audit` kèm `project_dir` (hoặc [scripts/acade_electrical_audit.py](scripts/acade_electrical_audit.py) `--mdb ... --project-dir ...`) truy vấn đồng thời **Scratch Database (`<project>.mdb`)** và dựng **Đồ thị Mạng điện (`Electrical Netlist DRC`)** trên từng file `.dwg` qua `accoreconsole.exe`, chặn cứng xuất bản (`exit 2`) nếu bất kỳ chỉ số nào `> 0`:
      - **`modelspace_titleblock_violations > 0`**: Đặt nhầm `TITLE_BLOCK_A3_BILINGUAL` trong `Model Space` hoặc lưu file ở `TILEMODE=1` thay vì tab `Layout ISO_A3` (`TILEMODE=0`).
      - **`short_circuit_nets > 0`**: Ngắn mạch chạm đất **`PE` chạm vào Pha `L1/L2/L3` / `N` / `+24VDC`**, chạm chập giữa các pha xoay chiều, hoặc **vi phạm cách ly nối thẳng `AC (L/N)` sang `DC (+24V/0VDC)`** không qua bộ nguồn!

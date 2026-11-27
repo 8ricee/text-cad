@@ -122,15 +122,26 @@ def convert_tia_to_acade(in_csv: Path, out_csv: Path) -> int:
         desc2 = parts[1] if len(parts) > 1 else ""
 
         upper_addr = addr.lstrip("%").upper()
+        tag_alpha = tag.upper().lstrip("-=+0123456789")
         # Column BLOCK (BLK_NAME = B in default_plc_io.wdi) must be a real peripheral symbol in Libs\iec-60617
         if "SAFETY" in path_name:
-            code, block, slot, wtype = "6ES7526-1BH00-0AB0", "VSW12", "4", "SAFE_24VDC_YE_0.75"
+            code, block, slot, wtype, loc_def = "6ES7526-1BH00-0AB0", "VSW12", "4", "SAFE_24VDC_YE_0.75", "+DOOR"
         elif upper_addr.startswith("IW"):
-            code, block, slot, wtype = "6ES7531-7KF00-0AB0", "", "5", "SIG_PLC_BU_0.5"
+            code, block, slot, wtype, loc_def = "6ES7531-7KF00-0AB0", "", "5", "SIG_PLC_BU_0.5", "+FIELD"
         elif upper_addr.startswith("Q"):
-            code, block, slot, wtype = "6ES7522-1BH01-0AB0", "VCR1", "3", "CTRL_24VDC_DBU_0.75"
+            if tag_alpha.startswith("H"):
+                code, block, slot, wtype, loc_def = "6ES7522-1BH01-0AB0", "VLT1A", "3", "CTRL_24VDC_DBU_0.75", "+DOOR"
+            elif tag_alpha.startswith("Y"):
+                code, block, slot, wtype, loc_def = "6ES7522-1BH01-0AB0", "VSV1", "3", "CTRL_24VDC_DBU_0.75", "+FIELD"
+            else:
+                code, block, slot, wtype, loc_def = "6ES7522-1BH01-0AB0", "VCR1", "3", "CTRL_24VDC_DBU_0.75", "+MAIN_PNL"
         else:
-            code, block, slot, wtype = "6ES7521-1BH00-0AB0", "VPB11", "2", "SIG_PLC_BU_0.5"
+            if tag_alpha.startswith("K"):
+                code, block, slot, wtype, loc_def = "6ES7521-1BH00-0AB0", "VCR1", "2", "SIG_PLC_BU_0.5", "+MAIN_PNL"
+            elif tag_alpha.startswith("SQ") or tag_alpha.startswith("B"):
+                code, block, slot, wtype, loc_def = "6ES7521-1BH00-0AB0", "VPX1", "2", "SIG_PLC_BU_0.5", "+FIELD"
+            else:
+                code, block, slot, wtype, loc_def = "6ES7521-1BH00-0AB0", "VPB11", "2", "SIG_PLC_BU_0.5", "+DOOR"
 
         acade_rows.append(
             {
@@ -145,7 +156,7 @@ def convert_tia_to_acade(in_csv: Path, out_csv: Path) -> int:
                 "DESC3": f"CH{idx}",
                 "TERMDESC": upper_addr,
                 "WIRETYPE": wtype,
-                "LOC": "+FIELD",
+                "LOC": loc_def,
                 "INST": "=PLC1",
             }
         )

@@ -806,11 +806,31 @@ def build_custom_symbol_va1_weigh_trans() -> Path:
 
 
 def build_native_acade_project_manifest(project_dir: Path, project_name: str = "conveyor_weighing_station") -> dict:
-    """Build the native ACADE .wdp/.dwg execution manifest (3-phase Parent/Child, smart wires, AEPLCIO, .rgf, and MDB Gatekeeper)."""
+    """Build the native ACADE .wdp/.dwg execution manifest (3-phase Parent/Child, smart wires, multi-page AEPLCIO, .rgf, and MDB Gatekeeper)."""
+    plc_csv = Path(__file__).resolve().parent.parent / "templates" / "plc_io_import_template.csv"
+    plc_slots: set[tuple[str, str]] = set()
+    if plc_csv.exists():
+        with plc_csv.open("r", encoding="utf-8-sig", newline="") as _pf:
+            for _pr in csv.DictReader(_pf):
+                plc_slots.add((_pr.get("RACK", "0").strip(), _pr.get("SLOT", "2").strip()))
+    n_plc_pages = max(1, (len(plc_slots) + 1) // 2)
+    sheets = [
+        {"file": "01_cover_and_index.dwg", "desc": "COVER AND DRAWING INDEX"},
+        {"file": "04_power_distribution.dwg", "desc": "POWER DISTRIBUTION SCHEMATIC"},
+        {"file": "05_control_schematic.dwg", "desc": "CONTROL & LOAD CELL SCHEMATIC"},
+        {"file": "06_plc_io_wiring.dwg", "desc": "PLC I/O WIRING (PAGE 1)"},
+    ]
+    for p_idx in range(1, n_plc_pages):
+        sheets.append({"file": f"06{chr(ord('a') + p_idx)}_plc_io_wiring.dwg", "desc": f"PLC I/O WIRING (PAGE {p_idx + 1})"})
+    sheets.extend([
+        {"file": "07_panel_layout.dwg", "desc": "PANEL LAYOUT", "sub": "PANEL"},
+        {"file": "09_terminal_and_cable_list.dwg", "desc": "TERMINAL & CABLE LIST"},
+    ])
     return {
         "project_init": {
             "project_dir": str(project_dir),
             "project_name": project_name,
+            "sheets": sheets,
             "descriptions": {
                 "LINE1": "TRAM CAN & DIEU KHIEN BANG TAI (MCC-WEIGH-01)",
                 "LINE3": "MCC-WEIGH-01",
@@ -872,9 +892,16 @@ def execute_native_manifest(manifest: dict, mdb_path: Path | None = None) -> dic
     wire_res = mcp.tool_acade_draw_smart_wires_and_arrows(manifest["wires_and_arrows_sheet_05"])
     sym_res = [mcp.tool_acade_insert_schematic_symbol(sym) for sym in manifest["schematic_symbols_sheet_05"]]
 
-    # Sheet 06: Open 06_plc_io_wiring.dwg -> Build PLCIO modules + left-side wired I/O channels
-    mcp.tool_autocad_open_or_new({"path": str(proj_dir / "06_plc_io_wiring.dwg")})
-    plc_res = mcp.tool_acade_build_plc_from_csv({"csv_path": manifest["plc_io_csv"]})
+    # Sheet 06 (+ 06b.. if >2 PLC modules): Build all PLCIO pages without dropping any module!
+    plc_sheets = [
+        s["file"]
+        for s in (manifest["project_init"].get("sheets") or [{"file": "06_plc_io_wiring.dwg"}])
+        if s["file"].startswith("06")
+    ]
+    plc_res = []
+    for p_idx, p_fname in enumerate(plc_sheets):
+        mcp.tool_autocad_open_or_new({"path": str(proj_dir / p_fname)})
+        plc_res.append(mcp.tool_acade_build_plc_from_csv({"csv_path": manifest["plc_io_csv"], "page_index": p_idx}))
 
     # Pass 1: Rebuild Scratch DB (.mdb) BEFORE Panel Footprint Sync so [COMP] has all Sheet 05 & 06 components
     mcp._run_acade_lisp_checked('(command "_AEREBUILDDB")', ["c:wd_insym2"], auto_save=True)
@@ -885,18 +912,15 @@ def execute_native_manifest(manifest: dict, mdb_path: Path | None = None) -> dic
         mcp.tool_autocad_open_or_new({"path": str(proj_dir / "07_panel_layout.dwg")})
         panel_res = mcp.tool_acade_sync_panel_footprints({"mdb_path": str(mdb_path), "run_aefootprint": True})
 
-    sheet_paths = [
-        str(proj_dir / s)
-        for s in (
-            "01_cover_and_index.dwg",
-            "04_power_distribution.dwg",
-            "05_control_schematic.dwg",
-            "06_plc_io_wiring.dwg",
-            "07_panel_layout.dwg",
-            "09_terminal_and_cable_list.dwg",
-        )
-        if (proj_dir / s).exists()
+    ordered_sheet_names = [s["file"] for s in (manifest["project_init"].get("sheets") or [])] or [
+        "01_cover_and_index.dwg",
+        "04_power_distribution.dwg",
+        "05_control_schematic.dwg",
+        "06_plc_io_wiring.dwg",
+        "07_panel_layout.dwg",
+        "09_terminal_and_cable_list.dwg",
     ]
+    sheet_paths = [str(proj_dir / s) for s in ordered_sheet_names if (proj_dir / s).exists()]
     # Pass 2: Equipotential wire numbering (%S%N) + _AEREBUILDDB (populates PNLCOMP, WFRM2ALL, PLCIO, TERMS) + Title Block Update
     retag_res = mcp.tool_acade_run_reports_and_retag({"sheet_paths": sheet_paths})
     report_res = None
@@ -1396,7 +1420,7 @@ def build_release_pdf_and_previews(dxf_paths: list[Path], dxf_3d_path: Path) -> 
         render_dxf_to_matplotlib_ax(doc3d, ax, is_3d=True)
         fig.tight_layout(pad=0.1)
         pdf.savefig(fig, dpi=200)
-        fig.savefig(PDF_DIR / "preview_09_panel_3d_assembly.png", dpi=180)
+        fig.savefig(PDF_DIR / "preview_10_panel_3d_assembly.png", dpi=180)
         plt.close(fig)
 
     return out_pdf
