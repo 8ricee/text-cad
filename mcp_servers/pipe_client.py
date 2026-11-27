@@ -53,6 +53,20 @@ _kernel32.ReadFile.restype = wintypes.BOOL
 _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 _kernel32.CloseHandle.restype = wintypes.BOOL
 
+_kernel32.CreateProcessW.argtypes = [
+    wintypes.LPCWSTR,
+    wintypes.LPWSTR,
+    wintypes.LPVOID,
+    wintypes.LPVOID,
+    wintypes.BOOL,
+    wintypes.DWORD,
+    wintypes.LPVOID,
+    wintypes.LPCWSTR,
+    wintypes.LPVOID,
+    wintypes.LPVOID,
+]
+_kernel32.CreateProcessW.restype = wintypes.BOOL
+
 
 def pipe_available(pipe_name: str, wait_ms: int = 400) -> bool:
     """Return True if the Named Pipe server is currently listening."""
@@ -103,9 +117,7 @@ def launch_on_desktop(cmd_str: str, cwd_dir: str) -> int:
     si.lpDesktop = "WinSta0\\Default"
     pi = PROCESS_INFORMATION()
     cmd_buf = ctypes.create_unicode_buffer(cmd_str)
-    ok = _kernel32.CreateProcessW(None, cmd_buf, None, None, False, 0x01000010, None, cwd_dir, ctypes.byref(si), ctypes.byref(pi))
-    if not ok:
-        ok = _kernel32.CreateProcessW(None, cmd_buf, None, None, False, 0x00000010, None, cwd_dir, ctypes.byref(si), ctypes.byref(pi))
+    ok = _kernel32.CreateProcessW(None, cmd_buf, None, None, False, 0x00000010, None, cwd_dir, ctypes.byref(si), ctypes.byref(pi))
     if not ok:
         raise RuntimeError(f"CreateProcessW failed (Win32 error {ctypes.get_last_error()}): {cmd_str}")
     _kernel32.CloseHandle(pi.hThread)

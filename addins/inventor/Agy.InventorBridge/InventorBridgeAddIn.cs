@@ -1,22 +1,29 @@
 using System.IO;
 using System.IO.Pipes;
+using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.Loader;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Windows.Forms;
-using Autodesk.iLogic.Interfaces;
 using Inventor;
 using InvFile = System.IO.File;
 using InvPath = System.IO.Path;
 
 namespace Agy.InventorBridge;
 
+public sealed class AgyDocWrapper
+{
+    public Document Document { get; }
+    public AgyDocWrapper(Document doc) => Document = doc;
+}
+
 [ComVisible(true)]
 [Guid("9D4C2B7E-61F3-4A88-BC52-8E17D3A94C22")]
 public sealed class InventorBridgeAddIn : ApplicationAddInServer
 {
     public const string PipeName = "agy-inventor-direct";
-    public const string ILogicAddInGuid = "{3BDD8D79-2179-4B11-8A5A-257B1C0263AC}";
+    internal const string InventorBinDir = @"C:\Program Files\Autodesk\Inventor 2027\Bin";
     private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
 
     private Inventor.Application? _inv;
@@ -28,11 +35,31 @@ public sealed class InventorBridgeAddIn : ApplicationAddInServer
 
     public void Activate(ApplicationAddInSite addInSiteObject, bool firstTime)
     {
+        try { RegisterBinResolver(); } catch { }
         _inv = addInSiteObject.Application;
         _uiControl = new Control();
         _ = _uiControl.Handle; // Bind Win32 HWND on Inventor's Main STA UI thread
         _cts = new CancellationTokenSource();
         _serverTask = Task.Run(() => RunPipeServerLoopAsync(_cts.Token));
+    }
+
+    private static void RegisterBinResolver()
+    {
+        var alc = AssemblyLoadContext.GetLoadContext(typeof(InventorBridgeAddIn).Assembly);
+        if (alc != null)
+        {
+            alc.Resolving += (_, name) =>
+            {
+                string candidate = InvPath.Combine(InventorBinDir, name.Name + ".dll");
+                return InvFile.Exists(candidate) ? AssemblyLoadContext.Default.LoadFromAssemblyPath(candidate) : null;
+            };
+        }
+        AppDomain.CurrentDomain.AssemblyResolve += (_, args) =>
+        {
+            var an = new AssemblyName(args.Name);
+            string candidate = InvPath.Combine(InventorBinDir, an.Name + ".dll");
+            return InvFile.Exists(candidate) ? Assembly.LoadFrom(candidate) : null;
+        };
     }
 
     public void Deactivate()
@@ -86,14 +113,12 @@ public sealed class InventorBridgeAddIn : ApplicationAddInServer
                 }
                 catch (System.Exception ex)
                 {
-                    System.Exception root = ex is System.Reflection.TargetInvocationException tie && tie.InnerException != null
-                        ? tie.InnerException
-                        : ex;
+                    System.Exception root = UnwrapException(ex);
                     resp = new JsonObject
                     {
                         ["id"] = reqId,
                         ["ok"] = false,
-                        ["error"] = root.Message
+                        ["error"] = $"{root.Message} [{root.GetType().Name}]"
                     };
                 }
 
@@ -110,6 +135,13 @@ public sealed class InventorBridgeAddIn : ApplicationAddInServer
                 await Task.Delay(100, ct).ConfigureAwait(false);
             }
         }
+    }
+
+    private static System.Exception UnwrapException(System.Exception ex)
+    {
+        while (ex is TargetInvocationException tie && tie.InnerException != null)
+            ex = tie.InnerException;
+        return ex;
     }
 
     private T InvokeOnSta<T>(Func<T> func)
@@ -238,61 +270,21 @@ public sealed class InventorBridgeAddIn : ApplicationAddInServer
         if (script.Contains("$inv.", StringComparison.OrdinalIgnoreCase) || script.Contains("$doc.", StringComparison.OrdinalIgnoreCase))
         {
             throw new ArgumentException(
-                "PowerShell COM scripts ($inv / $doc) have been replaced by in-process .NET iLogic VB.NET rules (use ThisApplication and ThisDoc.Document).");
+                "PowerShell COM scripts ($inv / $doc) have been replaced by in-process .NET VB.NET / iLogic rules (use ThisApplication and ThisDoc.Document).");
         }
 
         Document doc = _inv!.ActiveDocument ?? throw new InvalidOperationException("No active Inventor document.");
-        ApplicationAddIn ilogicAddIn = _inv.ApplicationAddIns.ItemById[ILogicAddInGuid];
-        if (!ilogicAddIn.Activated)
-            ilogicAddIn.Activate();
+        object? retVal = VbScriptRunner.CompileAndRunInTransaction(_inv, doc, script);
 
-        var ilogic = (IiLogicAutomation)ilogicAddIn.Automation;
-        string ruleFile = InvPath.Combine(InvPath.GetTempPath(), "_agy_mcp_transient_rule.iLogicVb");
-        string outJsonFile = InvPath.Combine(InvPath.GetTempPath(), "_agy_mcp_rule_out.json");
-        if (InvFile.Exists(outJsonFile))
-            InvFile.Delete(outJsonFile);
-
-        InvFile.WriteAllText(ruleFile, script, Utf8NoBom);
-
-        Transaction txn = _inv.TransactionManager.StartTransaction((_Document)doc, "Agy.RunScript");
-        try
-        {
-            NameValueMap args = _inv.TransientObjects.CreateNameValueMap();
-            args.Add("OutJsonPath", outJsonFile);
-            int status = ilogic.RunExternalRuleWithArguments(doc, ruleFile, args);
-            if (status != 0)
-                throw new InvalidOperationException($"iLogic rule exited with error code {status}.");
-
-            doc.Update2(true);
-            txn.End();
-        }
-        catch
-        {
-            txn.Abort(); // Atomic rollback of all sketches, features, parameters, and constraints
-            throw;
-        }
-        finally
-        {
-            try { if (InvFile.Exists(ruleFile)) InvFile.Delete(ruleFile); } catch { }
-        }
-
-        if (InvFile.Exists(outJsonFile))
-        {
-            string raw = InvFile.ReadAllText(outJsonFile, Utf8NoBom).Trim();
-            try { InvFile.Delete(outJsonFile); } catch { }
-            if (!string.IsNullOrEmpty(raw))
-            {
-                try { return JsonNode.Parse(raw)?.AsObject() ?? new JsonObject { ["raw"] = raw }; }
-                catch { return new JsonObject { ["ok"] = true, ["raw"] = raw, ["atomic"] = true }; }
-            }
-        }
-
-        return new JsonObject
+        var outObj = new JsonObject
         {
             ["ok"] = true,
             ["document"] = doc.DisplayName,
             ["atomic"] = true
         };
+        if (retVal != null)
+            outObj["result"] = retVal.ToString();
+        return outObj;
     }
 
     private JsonObject HandleCheckConstraints()
@@ -424,10 +416,7 @@ public sealed class InventorBridgeAddIn : ApplicationAddInServer
             Directory.CreateDirectory(dir);
 
         if (!smcd.HasFlatPattern)
-        {
             smcd.Unfold();
-            try { smcd.FlatPattern.ExitEdit(); } catch { }
-        }
 
         const string fmt =
             "FLAT PATTERN DXF?AcadVersion=2018&OuterProfileLayer=OUTER_PROFILE&InteriorProfilesLayer=INNER_CUTS" +
