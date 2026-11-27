@@ -1018,14 +1018,25 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
         key = (row.get("RACK", "0").strip(), row.get("SLOT", "2").strip(), row.get("CODE", "").strip())
         modules.setdefault(key, []).append(row)
 
-    if len(modules) > 2:
-        raise ValueError(
-            f"PLC Sheet Overflow: CSV has {len(modules)} modules, exceeding the A3 Safe Zone limit of 2 PLC columns per sheet! "
-            "Split your CSV so each PLC sheet has at most 2 modules."
-        )
+    slot_filter = args.get("slot_filter")
+    mod_items = list(modules.items())
+    if slot_filter:
+        allowed = {str(s).strip().upper() for s in slot_filter}
+        mod_items = [
+            (k, v) for idx, (k, v) in enumerate(mod_items)
+            if k[1].strip().upper() in allowed or str(idx) in allowed or str(idx + 1) in allowed
+        ]
+    total_modules = len(mod_items)
+    total_pages = max(1, (total_modules + 1) // 2)
+    page_index = int(args.get("page_index", 0) or 0)
+    if len(mod_items) > 2:
+        start = page_index * 2
+        mod_items = mod_items[start:start + 2]
+        if not mod_items:
+            raise ValueError(f"page_index={page_index} out of range for {total_modules} PLC modules (total_pages={total_pages}).")
 
     lisp_parts: list[str] = ['(regapp "VIA_WD_WIRETYPE")']
-    for mod_idx, ((rack, slot, code), ch_rows) in enumerate(modules.items()):
+    for mod_idx, ((rack, slot, code), ch_rows) in enumerate(mod_items):
         if len(ch_rows) > 10:
             raise ValueError(
                 f"PLC Column Overflow: Module Slot {slot} has {len(ch_rows)} rows (max 10 channels per column on A3 without intruding into Title Block)."
@@ -1035,7 +1046,7 @@ def tool_acade_build_plc_from_csv(args: dict[str, Any]) -> dict[str, Any]:
         mod_tag = f"-A1:S{slot}"
         first_inst = (ch_rows[0].get("INST") or "=PLC1").strip() if ch_rows else "=PLC1"
         is_do_mod = any((r.get("ADDRESS") or "").strip().upper().lstrip("%").startswith("Q") for r in ch_rows)
-        common_layer = "CTRL_0VDC_WHBU_0.75" if is_do_mod else "CTRL_24VDC_DBU_0.75"
+        common_layer = "CTRL_0VDC_BUWH_0.75" if is_do_mod else "CTRL_24VDC_DBU_0.75"
         common_sig = "BUS_0VDC_PELV" if is_do_mod else "BUS_24VDC_PELV"
         common_wno = "0VDC" if is_do_mod else "+24VDC"
         rail_x = mx - 115.0
@@ -1197,25 +1208,21 @@ $conn.Close()
 """
     res = _run_ps(ps, timeout=30)
     if args.get("run_aefootprint") and res.get("components"):
-        panel_root = Path(r"F:\Projects\CAD\Libraries\AutoCAD-Electrical\2027\Libs\panel\CUSTOM")
-        # Real panel coordinates matching 800x1200mm enclosure (+MAIN_PNL at ox=1090, +DOOR at ox=0)
-        known_coords = {
-            "-Q1": (1202.0, 545.0),
-            "-F1": (1340.0, 567.0),
-            "-Q3": (1400.0, 565.0),
-            "-Q2": (1444.0, 561.0),
-            "-K1": (1502.0, 567.0),
-            "-U1": (1630.0, 512.0),
-            "-G1": (1214.0, 882.0),
-            "-A1": (1318.0, 871.0),
-            "-K_SAF1": (1542.0, 895.0),
-            "-A2": (1605.0, 890.0),
-            "-X0": (1214.0, 240.0),
-            "-X1": (1338.0, 245.0),
-            "-X3": (1372.0, 240.0),
-            "-S10": (580.0, 510.0),
-            "-H1": (165.0, 525.0),
-        }
+        panel_candidates = [
+            Path(os.environ["ACADE_LIBS_DIR"]) / "panel" / "CUSTOM" if os.environ.get("ACADE_LIBS_DIR") else None,
+            Path(r"F:\Projects\CAD\Libraries\AutoCAD-Electrical\2027\Libs\panel\CUSTOM"),
+            Path(r"C:\Users\Public\Documents\Autodesk\Acade 2027\Libs\panel\CUSTOM"),
+        ]
+        panel_root = next((p for p in panel_candidates if p is not None and p.exists()), panel_candidates[1])
+        placements = args.get("placements") or {}
+        enc = args.get("enclosure_size") or {}
+        enc_w = float(enc.get("width_mm", 800.0))
+        enc_h = float(enc.get("height_mm", 1200.0))
+        plate_w = float(enc.get("plate_width_mm", enc_w - 60.0))
+        plate_h = float(enc.get("plate_height_mm", enc_h - 60.0))
+        door_ox, pnl_ox = 0.0, enc_w + 290.0
+        plate_x0, plate_y0 = pnl_ox + (enc_w - plate_w) / 2.0, (enc_h - plate_h) / 2.0
+
         ins_exprs = [
             '(regapp "VIA_WD_FP")',
             '(setq _doc (vla-get-ActiveDocument (vlax-get-acad-object)))',
@@ -1223,12 +1230,27 @@ $conn.Close()
             '(if (not (tblobjname "LAYER" "PNL_ENCLOSURE")) (entmake \'((0 . "LAYER") (100 . "AcDbSymbolTableRecord") (100 . "AcDbLayerTableRecord") (2 . "PNL_ENCLOSURE") (70 . 0) (62 . 7) (6 . "CONTINUOUS"))))',
             '(if (not (tblobjname "LAYER" "PNL_PLATE")) (entmake \'((0 . "LAYER") (100 . "AcDbSymbolTableRecord") (100 . "AcDbLayerTableRecord") (2 . "PNL_PLATE") (70 . 0) (62 . 8) (6 . "CONTINUOUS"))))',
             '(setq _ms (vla-get-ModelSpace _doc))',
-            # Draw 800x1200 door & 740x1140 mounting plate outlines in 1:1 mm Model Space
-            '(entmake \'((0 . "LWPOLYLINE") (100 . "AcDbEntity") (8 . "PNL_ENCLOSURE") (100 . "AcDbPolyline") (90 . 4) (70 . 1) (10 0.0 0.0) (10 800.0 0.0) (10 800.0 1200.0) (10 0.0 1200.0)))',
-            '(entmake \'((0 . "LWPOLYLINE") (100 . "AcDbEntity") (8 . "PNL_ENCLOSURE") (100 . "AcDbPolyline") (90 . 4) (70 . 1) (10 1090.0 0.0) (10 1890.0 0.0) (10 1890.0 1200.0) (10 1090.0 1200.0)))',
-            '(entmake \'((0 . "LWPOLYLINE") (100 . "AcDbEntity") (8 . "PNL_PLATE") (100 . "AcDbPolyline") (90 . 4) (70 . 1) (10 1120.0 30.0) (10 1860.0 30.0) (10 1860.0 1170.0) (10 1120.0 1170.0)))',
+            # Draw door & mounting plate outlines in 1:1 mm Model Space
+            f'(entmake \'((0 . "LWPOLYLINE") (100 . "AcDbEntity") (8 . "PNL_ENCLOSURE") (100 . "AcDbPolyline") (90 . 4) (70 . 1) (10 {door_ox} 0.0) (10 {door_ox + enc_w} 0.0) (10 {door_ox + enc_w} {enc_h}) (10 {door_ox} {enc_h})))',
+            f'(entmake \'((0 . "LWPOLYLINE") (100 . "AcDbEntity") (8 . "PNL_ENCLOSURE") (100 . "AcDbPolyline") (90 . 4) (70 . 1) (10 {pnl_ox} 0.0) (10 {pnl_ox + enc_w} 0.0) (10 {pnl_ox + enc_w} {enc_h}) (10 {pnl_ox} {enc_h})))',
+            f'(entmake \'((0 . "LWPOLYLINE") (100 . "AcDbEntity") (8 . "PNL_PLATE") (100 . "AcDbPolyline") (90 . 4) (70 . 1) (10 {plate_x0} {plate_y0}) (10 {plate_x0 + plate_w} {plate_y0}) (10 {plate_x0 + plate_w} {plate_y0 + plate_h}) (10 {plate_x0} {plate_y0 + plate_h})))',
         ]
+        if str(SKILL_ROOT / "scripts") not in sys.path:
+            sys.path.insert(0, str(SKILL_ROOT / "scripts"))
+        import csv as _csv
+        from seed_acade_databases import _build_panel_footprint_dwg_if_missing
+
+        fp_catalog: dict[str, dict[str, str]] = {}
+        fp_csv = SKILL_ROOT / "templates" / "verified_footprints_catalog.csv"
+        if fp_csv.exists():
+            with fp_csv.open("r", encoding="utf-8-sig", newline="") as _f:
+                for _r in _csv.DictReader(_f):
+                    if _r.get("CAT"):
+                        fp_catalog[_r["CAT"].strip().upper()] = _r
+
         placed_tags: list[str] = []
+        pnl_x, pnl_y, pnl_row_h = plate_x0 + 65.0, plate_y0 + plate_h - 140.0, 0.0
+        door_x, door_y = door_ox + 160.0, enc_h - 320.0
         for idx, comp in enumerate(res["components"]):
             mfg = _normalize_mfg(comp.get("mfg") or "SIEMENS")
             cat_raw = (comp.get("cat") or "").strip().upper()
@@ -1237,31 +1259,37 @@ $conn.Close()
             cat_clean = cat_raw.replace("-", "_").replace("/", "_")
             blknam = f"PNL_{mfg.replace(' ', '_')}_{cat_clean}"
             dwg_path = panel_root / mfg / f"{blknam}.dwg"
+            cat_row = fp_catalog.get(cat_raw)
             if not dwg_path.exists():
-                if str(SKILL_ROOT / "scripts") not in sys.path:
-                    sys.path.insert(0, str(SKILL_ROOT / "scripts"))
-                from seed_acade_databases import _build_panel_footprint_dwg_if_missing
-
-                loc_val = (comp.get("loc") or "+MAIN_PNL").upper()
-                fb_row = {
-                    "CAT": cat_raw,
-                    "W_MM": "30.0" if loc_val == "+DOOR" else "45.0",
-                    "H_MM": "40.0" if loc_val == "+DOOR" else "95.0",
-                    "MOUNT_TYPE": "DOOR" if loc_val == "+DOOR" else "DIN_TS35",
-                }
-                dwg_path = _build_panel_footprint_dwg_if_missing(panel_root.parent, mfg, blknam, fb_row)
+                if not cat_row:
+                    raise FileNotFoundError(
+                        f"Missing verified panel footprint for '{comp.get('tag')}' ({mfg} {cat_raw}): "
+                        f"neither {dwg_path} nor an entry in verified_footprints_catalog.csv exists (Fail-Closed)."
+                    )
+                dwg_path = _build_panel_footprint_dwg_if_missing(panel_root.parent, mfg, blknam, cat_row)
+            w_mm = float((cat_row or {}).get("W_MM") or 60.0)
+            h_mm = float((cat_row or {}).get("H_MM") or 100.0)
             tag = comp.get("tag", "")
             loc = comp.get("loc", "+MAIN_PNL")
             base_tag = tag.split(":")[0]
-            if base_tag in known_coords and ":" not in tag:
-                x, y = known_coords[base_tag]
-            elif base_tag == "-A1" and ":S" in tag:
-                slot_s = tag.split(":S")[-1]
-                s_num = int(slot_s) if slot_s.isdigit() else (idx + 1)
-                x, y = 1318.0 + max(0, s_num - 1) * 37.0, 871.0
+            if tag in placements:
+                x, y = float(placements[tag][0]), float(placements[tag][1])
+            elif base_tag in placements and ":" not in tag:
+                x, y = float(placements[base_tag][0]), float(placements[base_tag][1])
+            elif loc.upper() == "+DOOR":
+                x, y = door_x, door_y
+                door_x += max(90.0, w_mm + 45.0)
+                if door_x > door_ox + enc_w - 120.0:
+                    door_x = door_ox + 160.0
+                    door_y -= 140.0
             else:
-                x = (120.0 if loc == "+DOOR" else 1200.0) + (idx % 4) * 140.0
-                y = 900.0 - (idx // 4) * 220.0
+                if pnl_x + w_mm > plate_x0 + plate_w - 40.0:
+                    pnl_x = plate_x0 + 65.0
+                    pnl_y -= max(210.0, pnl_row_h + 60.0)
+                    pnl_row_h = 0.0
+                x, y = pnl_x, pnl_y
+                pnl_x += w_mm + 18.0
+                pnl_row_h = max(pnl_row_h, h_mm)
             ins_exprs.append(
                 f'(setq _vfp (vla-InsertBlock _ms (vlax-3d-point {x} {y} 0.0) {_lisp_str(str(dwg_path))} 1.0 1.0 1.0 0.0)) '
                 f'(vla-put-Layer _vfp "PNL_FOOTPRINT") '
@@ -1721,8 +1749,8 @@ def tool_acade_insert_verified_circuit(args: dict[str, Any]) -> dict[str, Any]:
             # Galvanically isolated DC Output +24VDC & 0VDC from bottom pins
             {"p1": [x_24v, g_y - 5.0], "p2": [x_24v, out_24_y], "layer": "CTRL_24VDC_DBU_0.75"},
             {"p1": [x_24v, out_24_y], "p2": [arr_x, out_24_y], "layer": "CTRL_24VDC_DBU_0.75"},
-            {"p1": [x_0v, g_y - 5.0], "p2": [x_0v, out_0v_y], "layer": "CTRL_0VDC_WHBU_0.75"},
-            {"p1": [x_0v, out_0v_y], "p2": [arr_x, out_0v_y], "layer": "CTRL_0VDC_WHBU_0.75"},
+            {"p1": [x_0v, g_y - 5.0], "p2": [x_0v, out_0v_y], "layer": "CTRL_0VDC_BUWH_0.75"},
+            {"p1": [x_0v, out_0v_y], "p2": [arr_x, out_0v_y], "layer": "CTRL_0VDC_BUWH_0.75"},
             # IEC 60204-1 Grounded PELV bond: 0VDC bonded to PE via dedicated PE link at x_pe + 10
             {"p1": [g_x + 46.0, y_pe], "p2": [g_x + 46.0, out_0v_y], "layer": "PWR_PE_GNYE_2.5"},
             {"p1": [x_0v, out_0v_y], "p2": [g_x + 46.0, out_0v_y], "layer": "PWR_PE_GNYE_2.5"},
@@ -1746,8 +1774,72 @@ def tool_acade_insert_verified_circuit(args: dict[str, Any]) -> dict[str, Any]:
                 {"TAG1": g_tag, "MFG": "SIEMENS", "CAT": str(args.get("psu_cat", "6EP1334-2BA20")), "LOC": "+MAIN_PNL", "INST": inst, "DESC1": str(args.get("desc1", "SITOP 24VDC 10A PELV"))},
             ),
         ])
+    elif ctype == "STAR_DELTA_3P":
+        q_tag = str(args.get("mpcb_tag", "-Q1"))
+        km_tag = str(args.get("contactor_tag", "-K1M"))
+        kd_tag = str(args.get("delta_tag", "-K1D"))
+        ks_tag = str(args.get("star_tag", "-K1S"))
+        m_tag = str(args.get("motor_tag", "-M1"))
+        inst = str(args.get("inst", "=CONVEYOR"))
+        desc1 = str(args.get("desc1", "STAR-DELTA MOTOR 11KW"))
+        x1, x2, x3 = ox, ox + 13.0, ox + 26.0
+        kd_x = ox + 52.0
+        ks_x = ox + 98.0
+        y1, y2, y3, y_pe = bus_ys[0], bus_ys[1], bus_ys[2], bus_ys[4]
+        y_q, y_km, y_mot = 222.0, 178.0, 125.0
+        y_kd, y_ks = 178.0, 178.0
+        wires.extend([
+            {"p1": [x1, y1], "p2": [x1, y_mot + 10.0], "layer": "PWR_L1_BK_2.5"},
+            {"p1": [x2, y2], "p2": [x2, y_mot + 10.0], "layer": "PWR_L2_BK_2.5"},
+            {"p1": [x3, y3], "p2": [x3, y_mot + 10.0], "layer": "PWR_L3_BK_2.5"},
+            {"p1": [x3 + 12.0, y_pe], "p2": [x3 + 12.0, y_mot - 10.0], "layer": "PWR_PE_GNYE_2.5"},
+            {"p1": [x3 + 4.0, y_mot - 10.0], "p2": [x3 + 12.0, y_mot - 10.0], "layer": "PWR_PE_GNYE_2.5"},
+            # Delta & Star contactor branches
+            {"p1": [x1, 200.0], "p2": [kd_x, 200.0], "layer": "PWR_L1_BK_2.5"},
+            {"p1": [x2, 196.0], "p2": [kd_x + 13.0, 196.0], "layer": "PWR_L2_BK_2.5"},
+            {"p1": [x3, 192.0], "p2": [kd_x + 26.0, 192.0], "layer": "PWR_L3_BK_2.5"},
+            {"p1": [kd_x, 200.0], "p2": [kd_x, 148.0], "layer": "PWR_L1_BK_2.5"},
+            {"p1": [kd_x + 13.0, 196.0], "p2": [kd_x + 13.0, 148.0], "layer": "PWR_L2_BK_2.5"},
+            {"p1": [kd_x + 26.0, 192.0], "p2": [kd_x + 26.0, 148.0], "layer": "PWR_L3_BK_2.5"},
+            {"p1": [kd_x, 148.0], "p2": [ks_x, 148.0], "layer": "PWR_L1_BK_2.5"},
+            {"p1": [kd_x + 13.0, 152.0], "p2": [ks_x + 13.0, 152.0], "layer": "PWR_L2_BK_2.5"},
+            {"p1": [kd_x + 26.0, 156.0], "p2": [ks_x + 26.0, 156.0], "layer": "PWR_L3_BK_2.5"},
+            {"p1": [ks_x, 192.0], "p2": [ks_x, 148.0], "layer": "PWR_L1_BK_2.5"},
+            {"p1": [ks_x + 13.0, 192.0], "p2": [ks_x + 13.0, 152.0], "layer": "PWR_L2_BK_2.5"},
+            {"p1": [ks_x + 26.0, 192.0], "p2": [ks_x + 26.0, 156.0], "layer": "PWR_L3_BK_2.5"},
+            {"p1": [ks_x, 192.0], "p2": [ks_x + 26.0, 192.0], "layer": "PWR_L1_BK_2.5"},
+        ])
+        dots.extend([[x1, y1], [x2, y2], [x3, y3], [x3 + 12.0, y_pe], [x1, 200.0], [x2, 196.0], [x3, 192.0], [ks_x + 13.0, 192.0]])
+        sym_lisps.extend([
+            _build_symbol_lisp("VCB11Q13", [x1, y_q], {"TAG1": q_tag, "MFG": "SIEMENS", "CAT": "3RV2021-4DA10", "LOC": "+MAIN_PNL", "INST": inst, "DESC1": "MPCB 3P"}, poles=3, pole_spacing=13.0),
+            _build_symbol_lisp("VCR1", [x1, y_km], {"TAG1": km_tag, "MFG": "SIEMENS", "CAT": "3RT2026-1BB40", "LOC": "+MAIN_PNL", "INST": inst, "DESC1": "MAIN CONTACTOR"}, poles=3, pole_spacing=13.0),
+            _build_symbol_lisp("VCR1", [kd_x, y_kd], {"TAG1": kd_tag, "MFG": "SIEMENS", "CAT": "3RT2026-1BB40", "LOC": "+MAIN_PNL", "INST": inst, "DESC1": "DELTA CONTACTOR"}, poles=3, pole_spacing=13.0),
+            _build_symbol_lisp("VCR1", [ks_x, y_ks], {"TAG1": ks_tag, "MFG": "SIEMENS", "CAT": "3RT2026-1BB40", "LOC": "+MAIN_PNL", "INST": inst, "DESC1": "STAR CONTACTOR"}, poles=3, pole_spacing=13.0),
+            _build_symbol_lisp("VMO13", [x2, y_mot], {"TAG1": m_tag, "MFG": "SIEMENS", "CAT": "1LE1001-1CB23", "LOC": "+FIELD", "INST": inst, "DESC1": desc1}),
+        ])
+    elif ctype == "SAFETY_3SK1_2CH":
+        s_tag = str(args.get("estop_tag", "-S0"))
+        k_tag = str(args.get("safety_tag", "-K0"))
+        inst = str(args.get("inst", "=SAFETY"))
+        x_ch1, x_ch2, x_out = ox, ox + 22.0, ox + 52.0
+        wires.extend([
+            {"p1": [x_ch1, 250.0], "p2": [x_ch1, 165.0], "layer": "SAFE_24VDC_YE_0.75"},
+            {"p1": [x_ch2, 250.0], "p2": [x_ch2, 165.0], "layer": "SAFE_24VDC_YE_0.75"},
+            {"p1": [x_ch1, 165.0], "p2": [x_ch1, 120.0], "layer": "CTRL_0VDC_BUWH_0.75"},
+            {"p1": [x_out, 250.0], "p2": [x_out, 145.0], "layer": "CTRL_24VDC_DBU_0.75"},
+        ])
+        arrows.extend([
+            {"kind": "destination", "point": [x_ch1, 250.0], "sigcode": "BUS_24VDC_PELV", "wireno": "+24VDC"},
+            {"kind": "destination", "point": [x_ch2, 250.0], "sigcode": "BUS_24VDC_PELV", "wireno": "+24VDC"},
+            {"kind": "destination", "point": [x_ch1, 120.0], "sigcode": "BUS_0VDC_PELV", "wireno": "0VDC"},
+            {"kind": "source", "point": [x_out, 145.0], "sigcode": "SAFE_24VDC_EN", "wireno": "+24V_SAFE"},
+        ])
+        sym_lisps.extend([
+            _build_symbol_lisp("VPB12", [x_ch1, 220.0], {"TAG1": s_tag, "MFG": "SIEMENS", "CAT": "3SU1150-1HB20-1CG0", "LOC": "+DOOR", "INST": inst, "DESC1": "E-STOP 2CH NC"}, poles=2, pole_spacing=22.0),
+            _build_symbol_lisp("VCR1", [x_ch1, 165.0], {"TAG1": k_tag, "MFG": "SIEMENS", "CAT": "3SK1111-1AB30", "LOC": "+MAIN_PNL", "INST": inst, "DESC1": "SAFETY RELAY 3SK1"}, poles=2, pole_spacing=52.0),
+        ])
     else:
-        raise ValueError(f"Unsupported circuit_type '{ctype}'. Choose from: BUS_3PH_N_PE, DOL_3P, VFD_3P, PSU_24VDC_PELV.")
+        raise ValueError(f"Unsupported circuit_type '{ctype}'. Choose from: BUS_3PH_N_PE, DOL_3P, VFD_3P, PSU_24VDC_PELV, STAR_DELTA_3P, SAFETY_3SK1_2CH.")
 
     # Draw smart wires + dots + arrows FIRST, then insert & auto-trim multi-pole symbols SECOND!
     wire_res = tool_acade_draw_smart_wires_and_arrows({"wires": wires, "dots": dots, "arrows": arrows, "auto_save": False})
@@ -1756,7 +1848,7 @@ def tool_acade_insert_verified_circuit(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def tool_acade_electrical_audit(args: dict[str, Any]) -> dict[str, Any]:
-    """Run Fail-Closed Database + DWG Gatekeeper v2.0 audit on Project Scratch .mdb and optional project_dir."""
+    """Run Fail-Closed Database + DWG Gatekeeper v3.1 audit on Project Scratch .mdb and optional project_dir."""
     mdb_path = Path(args["mdb_path"]).resolve()
     cmd = [sys.executable, str(AUDIT_SCRIPT), "--mdb", str(mdb_path)]
     if args.get("project_dir"):
@@ -1907,11 +1999,11 @@ TOOLS = [
     },
     {
         "name": "acade_insert_verified_circuit",
-        "description": "Insert a pre-engineered, DRC-clean industrial circuit macro: BUS_3PH_N_PE (3P+N+PE busbars), DOL_3P (3P MPCB + 3P Contactor + Motor + isolated PE), VFD_3P (3P MPCB + VU1_VFD_3P + Motor + PE), or PSU_24VDC_PELV (2P L+N MCB + VG1_PSU_24V + Grounded PELV 0VDC->PE).",
+        "description": "Insert a pre-engineered, DRC-clean industrial circuit macro: BUS_3PH_N_PE, DOL_3P, VFD_3P, PSU_24VDC_PELV, STAR_DELTA_3P, or SAFETY_3SK1_2CH.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "circuit_type": {"type": "string", "enum": ["BUS_3PH_N_PE", "DOL_3P", "VFD_3P", "PSU_24VDC_PELV"]},
+                "circuit_type": {"type": "string", "enum": ["BUS_3PH_N_PE", "DOL_3P", "VFD_3P", "PSU_24VDC_PELV", "STAR_DELTA_3P", "SAFETY_3SK1_2CH"]},
                 "origin_x": {"type": "number", "default": 90.0},
                 "bus_ys": {"type": "array", "items": {"type": "number"}, "description": "[y_L1, y_L2, y_L3, y_N, y_PE]"},
                 "mpcb_tag": {"type": "string"},
@@ -1944,12 +2036,14 @@ TOOLS = [
     },
     {
         "name": "acade_build_plc_from_csv",
-        "description": "Validate peripheral BLOCK names in PLC I/O CSV and run ACADE Spreadsheet to PLC I/O Utility (AEPLCIO).",
+        "description": "Validate peripheral BLOCK names in PLC I/O CSV and run ACADE Spreadsheet to PLC I/O Utility (AEPLCIO) with automatic 2-module/sheet pagination.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "csv_path": {"type": "string"},
                 "wdi_path": {"type": "string"},
+                "slot_filter": {"type": "array", "items": {"type": "string"}},
+                "page_index": {"type": "integer", "default": 0},
                 "auto_save": {"type": "boolean", "default": True},
             },
             "required": ["csv_path"],
@@ -1957,11 +2051,13 @@ TOOLS = [
     },
     {
         "name": "acade_sync_panel_footprints",
-        "description": "Query COMP (+MAIN_PNL, +DOOR) from Project Scratch .mdb to sync Panel Footprints (P_TAG1) on 07_panel_layout.dwg.",
+        "description": "Query COMP (+MAIN_PNL, +DOOR) from Project Scratch .mdb to sync verified 1:1 Panel Footprints (P_TAG1) on 07_panel_layout.dwg (Fail-Closed if missing from catalog).",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "mdb_path": {"type": "string"},
+                "enclosure_size": {"type": "object", "description": "{\"width_mm\": 800, \"height_mm\": 1200}"},
+                "placements": {"type": "object", "description": "Optional {\"-Q1\": [x, y], ...} overrides"},
                 "run_aefootprint": {"type": "boolean", "default": False},
             },
             "required": ["mdb_path"],
@@ -2009,7 +2105,7 @@ TOOLS = [
     },
     {
         "name": "acade_electrical_audit",
-        "description": "Gatekeeper v2.0 audit on ACADE Project Scratch .mdb and .dwg sheets (missing catalog, duplicate tags, orphaned children, family block misuse, unupdated titleblocks, wires piercing symbols, open-circuit loads, panel layout violations).",
+        "description": "Gatekeeper v3.1 audit on ACADE Project Scratch .mdb and .dwg sheets (Netlist DRC, PINLIST overuse/dup pins, cross-sheet SIGCODE, duplicate terminals, Title Block, Panel Layout).",
         "inputSchema": {
             "type": "object",
             "properties": {

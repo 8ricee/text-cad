@@ -3,7 +3,7 @@
 Enforces all CAD & AutoCAD Electrical engineering standards:
 1. True 1:1 Millimeter Model Space ($INSUNITS = 4, $MEASUREMENT = 1, scale = 1.0) -> Every DLI / DIST check in AutoCAD
    measures exact physical millimeters (800, 1200, 740, 1140, 300, 442.3, Ø9, Ø22.5...).
-2. Paper Space Layout ('ISO_A3' 420x297 mm) with calibrated AutoCAD VIEWPORTs (1:12.5 on Panel Layout, 1:2.5 on Busbar)
+2. Paper Space Layout ('ISO_A3' 420x297 mm) with calibrated AutoCAD VIEWPORTs (1:20 on Panel Layout, 1:2.5 on Busbar)
    holding the ISO 5457 frame, Title Block, and bordered engineering schedules.
 3. 100% Native AutoCAD DIMENSION Entities (ISO_MM DimStyle, VN_ARIAL font, dimlfac = 1.0, zero hand-drawn LINE+TEXT fake dims).
 4. TrueType Unicode Font ('arial.ttf' on AC1032 / R2018 UTF-8 DXF) + Real Bordered Grid Tables + ezdxf.addons.drawing PDF export.
@@ -836,7 +836,7 @@ def build_native_acade_project_manifest(project_dir: Path, project_name: str = "
                 {"p1": [95.0, 265.0], "p2": [95.0, 195.0], "layer": "PWR_L2_BK_2.5"},
                 {"p1": [105.0, 265.0], "p2": [105.0, 195.0], "layer": "PWR_L3_BK_2.5"},
                 {"p1": [185.0, 260.0], "p2": [185.0, 200.0], "layer": "CTRL_24VDC_DBU_0.75"},
-                {"p1": [185.0, 200.0], "p2": [185.0, 185.0], "layer": "CTRL_0VDC_WHBU_0.75"},
+                {"p1": [185.0, 200.0], "p2": [185.0, 185.0], "layer": "CTRL_0VDC_BUWH_0.75"},
             ],
             "dots": [],
             "arrows": [
@@ -1283,7 +1283,7 @@ def build_sheet_08_busbar_fabrication() -> Path:
 
 
 def build_3d_assembly_dxf(scene: PanelAssembly3D) -> Path:
-    """Export the 1:1 3D PanelAssembly3D mechanical clash-check model to DXF/09_panel_3d_assembly.dxf.
+    """Export the 1:1 3D PanelAssembly3D mechanical clash-check model to DXF/10_panel_3d_assembly.dxf.
 
     Note: Real Inventor Electromechanical Link (.emx) must be generated via native ACADE AEEMLINK command,
     never via mocked Python ElementTree XML.
@@ -1322,9 +1322,9 @@ def build_3d_assembly_dxf(scene: PanelAssembly3D) -> Path:
     psp3d = setup_iso_a3_paperspace(doc3d, "ISO_A3")
     draw_iso_a3_frame_and_titleblock(
         psp3d,
-        sheet_no="09",
-        sheet_max="09",
-        dwg_no="MCC-WEIGH-09",
+        sheet_no="10",
+        sheet_max="10",
+        dwg_no="MCC-WEIGH-10",
         title_en="3D PANEL ASSEMBLY ISOMETRIC VIEW (1:1 MODEL, INVENTOR EMX LINK)",
         title_vi="PHỐI CẢNH LẮP RÁP 3D TỦ ĐIỆN & LIÊN KẾT INVENTOR .EMX",
         scale_str="NTS (ISO 3D)",
@@ -1339,7 +1339,7 @@ def build_3d_assembly_dxf(scene: PanelAssembly3D) -> Path:
     vp3d.dxf.view_direction_vector = (1.0, -1.0, 0.8)
     vp3d.dxf.status = 1
 
-    return save_dxf_safely(doc3d, DXF_DIR / "09_panel_3d_assembly.dxf")
+    return save_dxf_safely(doc3d, DXF_DIR / "10_panel_3d_assembly.dxf")
 
 
 def render_dxf_to_matplotlib_ax(doc: ezdxf.document.Drawing, ax, is_3d: bool = False) -> None:

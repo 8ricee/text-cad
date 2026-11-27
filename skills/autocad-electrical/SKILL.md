@@ -16,6 +16,21 @@ Skill quy chuẩn toàn diện cho **Thiết kế Sơ đồ Nguyên lý Điện*
 
 ---
 
+## ⛔ 10 RÀNG BUỘC CẤM TUYỆT ĐỐI CHO AGENT (HARD GUARDRAILS — FAIL-CLOSED)
+
+1. **Cấm đặt Khung tên / Viền A3 trong `Model Space`:** `TITLE_BLOCK_A3_BILINGUAL` và viền ISO 5457 bắt buộc nằm 100% ở `Paper Space Layout ISO_A3` (`$TILEMODE=0`).
+2. **Cấm cắt thiếu pha 3P+N+PE:** Mọi động cơ/biến tần 3 pha bắt buộc dùng `poles=3` (kèm nét đứt cơ khí `LINK`) hoặc `acade_insert_verified_circuit`; cấm lắp CB 1 cực trên `L1`.
+3. **Cấm nối tắt AC ↔ DC hoặc chạm đất PE:** Tuyệt đối cách ly `L/N` với `+24VDC/0VDC` (chỉ qua PSU); chỉ điểm `0VDC` PELV được nối đất `PE` đúng 1 điểm.
+4. **Cấm điền sai họ Block ACADE (`Family`):** `U/G/A` (VFD, PSU, PLC/Transmitter) chỉ dùng `VU1_VFD_3P` / `VG1_PSU_24V` / `VA1_*` / `HP1*`, cấm dùng `VCR1`/`HCR1`.
+5. **Cấm dùng `Child` thay `Parent`:** Thiết bị độc lập bắt buộc dùng `V*1*`/`H*1*` (Parent `PAR1_CHLD2=1`), cấm dùng `V*2*`/`H*2*` nếu không có Parent cùng `TAG1`.
+6. **Cấm để hở tải 1 chân hoặc đâm dây xuyên ký hiệu:** Luôn vẽ dây trước, chèn ký hiệu sau để ACADE tự cắt dây; tải `DO`/cuộn hút phải khép kín về `0VDC` (`CTRL_0VDC_BUWH_0.75`).
+7. **Cấm dùng `ezdxf` vẽ Sơ đồ nguyên lý hoặc gõ cứng `BOM`/`Wire List`:** `ezdxf` chỉ dùng cho CAM Busbar DXF (`08_busbar_fabrication`); bảng biểu phải sinh từ `.mdb`.
+8. **Cấm bịa kích thước Footprint hoặc để trống `MFG`/`CAT`:** Footprint phải tồn tại trong `Libs\panel\CUSTOM` hoặc `verified_footprints_catalog.csv` (Fail-Closed).
+9. **Cấm bỏ qua `SPARE` / Dự phòng (20–30%):** Mọi tủ PLC bắt buộc chừa tối thiểu 20% kênh `SPARE` kéo sẵn ra cầu đấu dự phòng, và 1–2 nhánh MCB/feeder dự phòng trên Sơ đồ động lực.
+10. **Cấm xuất bản nếu Gatekeeper `v3.1` (`acade_electrical_audit`) trả về bất kỳ lỗi nào (`passed = false`):** Bắt buộc sửa sạch 17 chỉ số về `0` trước khi bàn giao.
+
+---
+
 ## 🧭 Tài liệu Chuyên sâu theo Nhiệm vụ (References)
 
 Khi thực hiện thiết kế, tính toán hoặc kiểm tra từng loại tủ điện cụ thể, **đọc thêm tài liệu tương ứng** dưới đây:
@@ -100,7 +115,7 @@ Khi thực hiện thiết kế, tính toán hoặc kiểm tra từng loại tủ
 4. **Liên kết xuyên trang**: Bắt buộc chèn cặp **Source Arrow (`HA1S1` / `AESRCARROW`)** và **Destination Arrow (`HA1D3` / `AEDESTARROW`)** khớp `SIGCODE` (cấm vẽ thanh nguồn cụt 2 đầu chỉ ghi `TEXT`).
 5. **PLC I/O, Tín hiệu Tinh xảo (Load cell, Encoder, 4–20mA) & Mạng Truyền thông (`PROFINET`, `Modbus RTU`)**:
    - Với S7-1500: `Slot 0` = PS, `Slot 1` = CPU, module I/O bắt đầu từ **`Slot 2`**; mã module phải tồn tại trong **`ace_plc.mdb`** (nạp trước bằng [scripts/seed_acade_databases.py](scripts/seed_acade_databases.py)). Mạch dừng khẩn `E-STOP` 2 kênh qua **Safety Relay** hoặc module **F-DI (`PROFIsafe` dùng nguồn xung kiểm tra `VS0/VS1`)** theo [templates/plc_io_import_template.csv](templates/plc_io_import_template.csv).
-   - Trong file CSV của **`Spreadsheet to PLC I/O Utility`** (`AEPLCIO` / `acade_build_plc_from_csv`), vì các nhánh dây PLC I/O nằm ngang (`Horizontal Rungs`), linh kiện ngoại vi trên nhánh ngang dùng họ **`H*` ngang** (`HPB11`, `HSW11`, `HSW12`, `HPX1`, `HCR1`, `HLT1A`, `HSV1`; công cụ MCP tự động ánh xạ `V* -> H*`), bắt buộc đi qua cầu đấu trung gian `ht0001` (`-X2`/`-X3`) và **khép kín mạch 100% về thanh nguồn chung bên trái** (`+24VDC` cho ngõ vào `DI`, **`0VDC` `CTRL_0VDC_WHBU_0.75` kèm mũi tên `HA1D3`** cho ngõ ra `DO` nuôi tải 2 đầu dây) — **tuyệt đối không để hở 1 chân tải hoặc điền tên giả `PLC_DI_16` vào cột `BLOCK`**.
+   - Trong file CSV của **`Spreadsheet to PLC I/O Utility`** (`AEPLCIO` / `acade_build_plc_from_csv`), vì các nhánh dây PLC I/O nằm ngang (`Horizontal Rungs`), linh kiện ngoại vi trên nhánh ngang dùng họ **`H*` ngang** (`HPB11`, `HSW11`, `HSW12`, `HPX1`, `HCR1`, `HLT1A`, `HSV1`; công cụ MCP tự động ánh xạ `V* -> H*`), bắt buộc đi qua cầu đấu trung gian `ht0001` (`-X2`/`-X3`) và **khép kín mạch 100% về thanh nguồn chung bên trái** (`+24VDC` cho ngõ vào `DI`, **`0VDC` `CTRL_0VDC_BUWH_0.75` kèm mũi tên `HA1D3`** cho ngõ ra `DO` nuôi tải 2 đầu dây) — **tuyệt đối không để hở 1 chân tải hoặc điền tên giả `PLC_DI_16` vào cột `BLOCK`**.
    - Thiết kế mạch Analog `4–20mA` (2-wire/4-wire), Load cell (6 dây có `SENSE+/S-`), Encoder vi sai và mạng `PROFINET` / `Modbus RTU RS-485` (Daisy-chain, điện trở đầu cuối `120 Ω` ở 2 đầu mút) theo [references/control-and-lighting-panels.md](references/control-and-lighting-panels.md).
    - Đồng bộ 2 chiều qua bảng `I/O Assignment` dùng chung (`AEPLCIO` / `acade_build_plc_from_csv`) theo [references/project-lifecycle-plc-and-3d-sync.md](references/project-lifecycle-plc-and-3d-sync.md).
 
@@ -151,14 +166,14 @@ Khi thực hiện thiết kế, tính toán hoặc kiểm tra từng loại tủ
      - Sử dụng trực tiếp bộ tool chuyên biệt của MCP **`autocad-direct`** gọi thẳng AutoLISP API gốc của AutoCAD Electrical (nạp qua `wdload.lsp` → `(c:wd_load)`):
        1. **`acade_project_init`**: Sinh `.wdp` chuẩn IEC-60617, khởi tạo toàn bộ `.dwg` với `$TILEMODE=0` (Khung viền + `TITLE_BLOCK_A3_BILINGUAL` nằm 100% bên `Layout ISO_A3`, `Model Space` chỉ chứa `WD_M`: dùng `TEMPLATE_IEC_A3.dwt` `Viewport 1:1` cho trang nguyên lý và `TEMPLATE_PANEL_LAYOUT_A3.dwt` `Viewport 1:10` cho trang Panel Layout), ghi ngay `WD_M.SHEET` (`01..N`) + thuộc tính Khung tên và chạy `_AEREBUILDDB`.
        2. **`acade_insert_schematic_symbol`**: Hỗ trợ **`poles=1|2|3|4`** + `pole_spacing` (ghép tự động cực 1 `Parent` + cực 2..N `Child` kèm nét đứt cơ khí `LINK` cắt đủ cả 3 dây pha `L1,L2,L3`), kiểm tra **Safe Zone `[25..405, 12..276]`** chống tràn chữ, chặn `Child/Parent` & cấm `VCR1`/`HCR1` cho họ `U/G/A`, và tự cắt dây đâm xuyên linh kiện.
-       3. **`acade_insert_verified_circuit`**: Dựng sẵn các cụm mạch công nghiệp chuẩn 100% DRC (`BUS_3PH_N_PE`, `DOL_3P` 3 cực MPCB + 3 cực Contactor + PE đáy động cơ, `VFD_3P` 3 cực MPCB + `VU1_VFD_3P` + PE, `PSU_24VDC_PELV` MCB 2P `L+N` + `VG1_PSU_24V` + nối đất `0VDC -> PE`).
+       3. **`acade_insert_verified_circuit`**: Dựng sẵn các cụm mạch công nghiệp chuẩn 100% DRC (`BUS_3PH_N_PE`, `DOL_3P`, `VFD_3P`, `PSU_24VDC_PELV`, `STAR_DELTA_3P`, `SAFETY_3SK1_2CH`).
        4. **`acade_draw_smart_wires_and_arrows`**: Vẽ dây thông minh qua `(c:wd_wire_quik)`, chống trùng `WDDOT` và chèn cặp `Source/Destination Signal Arrows` (`HA1S1` / `HA1D3`).
        5. **`acade_build_plc_from_csv`**: Chèn block `PLCIO` thật (`HP1W--L` + `HP1WA-D`, giới hạn tối đa 2 cột/trang tại `my=256` không tràn khung A3), đổi `V* -> H*` cho nhánh ngang, thêm `ht0001` và khép kín mạch `+24VDC`/`0VDC`.
        6. **`acade_sync_panel_footprints`**: Truy vấn `+MAIN_PNL` & `+DOOR` từ `.mdb`, chuẩn hóa `MFG`, tự sinh Footprint `1:1 mm` nếu thiếu, ép Layer `PNL_FOOTPRINT` và trả về `Layout ISO_A3` (`TILEMODE=0`).
        7. **`acade_run_reports_and_retag`**: Đánh số dây nút đẳng thế `%S%N`, đồng bộ `WD_M.SHEET` + `TITLE_BLOCK_A3_BILINGUAL` trong `PaperSpace` trên mọi trang và chạy `_AEREBUILDDB`.
        8. **`acade_place_db_reports_on_drawing`**: Truy vấn Scratch `.mdb` đặt bảng `AcDbTable` động trực tiếp lên `PaperSpace` (`TILEMODE=0`).
        9. **`acade_insert_cable_and_jumper`**: Chèn `Cable Marker` (`VW01`/`VW02`) và cầu đấu `ht0001` kèm XDATA Jumper.
-       10. **`acade_electrical_audit`**: Thực thi **Gatekeeper v3.0 (Electrical Netlist DRC + Layout Gatekeeper)** kiểm toán đồng thời `.mdb` và toàn bộ `.dwg`.
+       10. **`acade_electrical_audit`**: Thực thi **Gatekeeper v3.1 (Electrical Netlist DRC + PINLIST/SIGCODE/Terminal + Layout Gatekeeper)** kiểm toán đồng thời `.mdb` và toàn bộ `.dwg`.
    - **Bắt buộc cấu hình Font TrueType Unicode (`arial.ttf`, `isocpeur.ttf` hoặc `tahoma.ttf`) trên chuẩn `R2018 (UTF-8)`** cho Textstyle `Standard` / `WD_IEC` / `VN_ARIAL` (cấm để `txt.shx` gây lỗi `?` Tiếng Việt).
    - Ánh xạ Title Block bằng mẫu [templates/default_iec_bilingual.wdt](templates/default_iec_bilingual.wdt), chạy **`Title Block Update` (`AEUPDATETITLEBLOCK`)** đồng bộ toàn dự án và xuất gộp bằng **Publish → Plot Project to PDF**.
 
@@ -168,13 +183,13 @@ Khi thực hiện thiết kế, tính toán hoặc kiểm tra từng loại tủ
 
 1. **Quản trị & Nạp tự động Cơ sở dữ liệu (`seed_acade_databases.py` & `AECATALOG`)**:
    - Trước khi dựng mạch, chạy [scripts/seed_acade_databases.py](scripts/seed_acade_databases.py) để nạp tự động dữ liệu `MFG` (viết IN HOA 100%), `CAT`, `_PINLIST` (Form C `4,...`), `ASSYCODE` vào `default_cat.mdb`, ánh xạ Footprint vào `footprint_lookup.mdb`, và mã module Siemens S7-1500/S7-1200 vào `ace_plc.mdb`.
-2. **Gatekeeper Kiểm toán Điện & Bố cục v3.0 Bắt buộc (`acade_electrical_audit` — Fail-Closed nếu vi phạm)**:
+2. **Gatekeeper Kiểm toán Điện & Bố cục v3.1 Bắt buộc (`acade_electrical_audit` — Fail-Closed nếu vi phạm)**:
    - Cuối mọi dự án, bắt buộc chạy `acade_electrical_audit` kèm `project_dir` (hoặc [scripts/acade_electrical_audit.py](scripts/acade_electrical_audit.py) `--mdb ... --project-dir ...`) truy vấn đồng thời **Scratch Database (`<project>.mdb`)** và dựng **Đồ thị Mạng điện (`Electrical Netlist DRC`)** trên từng file `.dwg` qua `accoreconsole.exe`, chặn cứng xuất bản (`exit 2`) nếu bất kỳ chỉ số nào `> 0`:
      - **`modelspace_titleblock_violations > 0`**: Đặt nhầm `TITLE_BLOCK_A3_BILINGUAL` trong `Model Space` hoặc lưu file ở `TILEMODE=1` thay vì tab `Layout ISO_A3` (`TILEMODE=0`).
      - **`short_circuit_nets > 0`**: Ngắn mạch chạm đất **`PE` chạm vào Pha `L1/L2/L3` / `N` / `+24VDC`**, chạm chập giữa các pha xoay chiều, hoặc **vi phạm cách ly nối thẳng `AC (L/N)` sang `DC (+24V/0VDC)`** không qua bộ nguồn!
      - **`unprotected_3phase_poles > 0`**: Động cơ 3 pha (`VMO13`) hoặc Biến tần (`VU1_VFD_3P`) có bất kỳ pha nào (`L1, L2, L3`) nối thẳng về thanh cái nguồn tổng mà không đi qua cực thiết bị đóng cắt bảo vệ (chặn lỗi chỉ lắp CB 1 cực trên `L1`).
      - **`text_or_attr_overflows > 0`**: Chữ hoặc thuộc tính tràn ra ngoài khung `[20..415, 5..287]` hoặc đè vào vùng Khung tên `[235..415, 5..41]`.
-     - **`family_block_misuse > 0`**, **`unupdated_titleblocks > 0`**, **`wires_piercing_symbols > 0`**, **`open_circuit_loads > 0`**, **`panel_layout_violations > 0`**, **`missing_catalog > 0`**, **`duplicate_tags > 0`**, **`orphaned_child_contacts > 0`**, **`wire_errors > 0`**, **`schematic_vs_panel_discrepancy > 0`**.
+     - **`family_block_misuse > 0`**, **`unupdated_titleblocks > 0`**, **`wires_piercing_symbols > 0`**, **`open_circuit_loads > 0`**, **`panel_layout_violations > 0`**, **`pinlist_overuse_or_dup_pins > 0`**, **`cross_sheet_sigcode_mismatch > 0`**, **`duplicate_terminal_numbers > 0`**, **`missing_catalog > 0`**, **`duplicate_tags > 0`**, **`orphaned_child_contacts > 0`**, **`wire_errors > 0`**, **`schematic_vs_panel_discrepancy > 0`**.
 3. **Đầy đủ 12 Bảng Chú thích & Báo cáo Tự động qua `.rgf` (`AEREPORTGROUP` -> `Put on Drawing`)**:
    - Sinh tự động từ Database qua [templates/project_master_reports.rgf](templates/project_master_reports.rgf) và `AEREPORT` (**cấm tuyệt đối** kẻ bảng `draw_grid_table()` gõ mảng chuỗi cứng cho BOM/Device Schedule/Wire List/Terminal Plan) theo [references/legends-and-schedules.md](references/legends-and-schedules.md) và [references/deliverables-and-fat.md](references/deliverables-and-fat.md).
 4. **Tài nguyên Mẫu & Script Tự động hóa (`templates/` & `scripts/`):**

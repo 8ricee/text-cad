@@ -55,15 +55,20 @@ def backup_mdb(mdb_path: Path) -> Path:
 
 FAMILY_TO_TABLE = {
     "Q": "CB",
+    "CB": "CB",
     "F": "FU",
     "K": "CR",
     "M": "MO",
     "G": "PS",
+    "T": "XF",
+    "Y": "SV",
+    "W": "W0",
     "A": "PLCIO",
     "U": "DR",
     "S": "PB",
     "H": "LT",
     "X": "TRMS",
+    "PE": "TRMS",
     "RE": "RE",
     "R": "RE",
 }
@@ -110,60 +115,92 @@ def seed_catalog_mdb(cat_mdb: Path, seed_csv: Path) -> dict[str, int]:
     with seed_csv.open("r", encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
 
-    statements: list[str] = []
+    rows_payload = []
     for row in rows:
-        cat = _sql_esc(row.get("CAT", ""))
-        mfg = _sql_esc(row.get("MFG", "").upper())
-        desc = _sql_esc(row.get("DESCRIPTION", ""))
+        cat = (row.get("CAT", "") or "").strip()
+        mfg = (row.get("MFG", "") or "").strip().upper()
         fam = (row.get("FAMILY", "") or "MISC_CAT").strip().upper()
         tbl = FAMILY_TO_TABLE.get(fam, "MISC_CAT")
-        coilpins = _sql_esc(row.get("COILPINS", ""))
-        pinlist = _sql_esc(row.get("PINLIST", ""))
-        assy = _sql_esc(row.get("ASSYCODE", ""))
-        wdblknam = _sql_esc(row.get("WDBLKNAM", ""))
-        web = _sql_esc(row.get("WEB", ""))
-        rating = _sql_esc(" ".join(filter(None, [row.get("RATING1", ""), row.get("RATING2", ""), row.get("RATING3", "")])))
+        pinlist = (row.get("PINLIST", "") or "").strip()
+        coilpins = (row.get("COILPINS", "") or "").strip()
+        assy = (row.get("ASSYCODE", "") or "").strip()
+        wdblknam = (row.get("WDBLKNAM", "") or "").strip()
+        web = (row.get("WEB", "") or "").strip()
+        desc = (row.get("DESCRIPTION", "") or "").strip()
+        rating = " ".join(filter(None, [row.get("RATING1", ""), row.get("RATING2", ""), row.get("RATING3", "")])).strip()
 
         if not cat or not mfg:
             continue
 
-        statements.append(
-            f"DELETE FROM [{tbl}] WHERE CATALOG='{cat}' AND MANUFACTURER='{mfg}'"
-        )
-        if tbl in ("CB", "FU"):
-            statements.append(
-                f"INSERT INTO [{tbl}] (CATALOG, MANUFACTURER, DESCRIPTION, RATING, ASSEMBLYCODE, WDBLKNAM, WEBLINK) "
-                f"VALUES ({_sql_val(cat)}, {_sql_val(mfg)}, {_sql_val(desc)}, {_sql_val(rating)}, {_sql_val(assy)}, {_sql_val(wdblknam)}, {_sql_val(web)})"
-            )
-        else:
-            statements.append(
-                f"INSERT INTO [{tbl}] (CATALOG, MANUFACTURER, DESCRIPTION, ASSEMBLYCODE, WDBLKNAM, WEBLINK) "
-                f"VALUES ({_sql_val(cat)}, {_sql_val(mfg)}, {_sql_val(desc)}, {_sql_val(assy)}, {_sql_val(wdblknam)}, {_sql_val(web)})"
-            )
-        if pinlist:
-            statements.append(
-                f"DELETE FROM [_PINLIST] WHERE CATALOG='{cat}' AND MANUFACTURER='{mfg}'"
-            )
-            statements.append(
-                f"INSERT INTO [_PINLIST] (MANUFACTURER, CATALOG, ASSEMBLYCODE, COILPINS, PINLIST) "
-                f"VALUES ({_sql_val(mfg)}, {_sql_val(cat)}, {_sql_val(assy)}, {_sql_val(coilpins)}, {_sql_val(pinlist)})"
-            )
+        rows_payload.append({
+            "tbl": tbl,
+            "CATALOG": cat,
+            "MANUFACTURER": mfg,
+            "DESCRIPTION": desc,
+            "RATING": rating,
+            "COILPINS": coilpins,
+            "ASSEMBLYCODE": assy,
+            "WDBLKNAM": wdblknam,
+            "WEBLINK": web,
+            "PINLIST": pinlist,
+        })
 
-    payload_json = json.dumps(statements)
+    payload_json = json.dumps(rows_payload)
     ps = f"""
 $ErrorActionPreference = 'Stop'
 $conn = New-Object System.Data.Odbc.OdbcConnection("Driver={{Microsoft Access Driver (*.mdb, *.accdb)}};Dbq={cat_mdb};")
 $conn.Open()
-$stmts = ConvertFrom-Json '{payload_json.replace("'", "''")}'
-$applied = 0
-foreach ($sql in $stmts) {{
-    $cmd = $conn.CreateCommand()
-    $cmd.CommandText = $sql
-    $null = $cmd.ExecuteNonQuery()
-    $applied++
+$colCache = @{{}}
+$rows = '{payload_json.replace("'", "''")}' | ConvertFrom-Json
+$count = 0
+foreach ($r in $rows) {{
+  $tbl = $r.tbl
+  if (-not $colCache.ContainsKey($tbl)) {{
+    $scCmd = $conn.CreateCommand()
+    $scCmd.CommandText = "SELECT TOP 1 * FROM [$tbl]"
+    $rdr = $scCmd.ExecuteReader()
+    $colsFound = @()
+    for ($i = 0; $i -lt $rdr.FieldCount; $i++) {{ $colsFound += $rdr.GetName($i).ToUpper() }}
+    $rdr.Close()
+    $colCache[$tbl] = $colsFound
+  }}
+  $avail = $colCache[$tbl]
+  if ($avail.Count -eq 0) {{ continue }}
+  $catEsc = $r.CATALOG.Replace("'", "''")
+  $mfgEsc = $r.MANUFACTURER.Replace("'", "''")
+  $del = $conn.CreateCommand()
+  $del.CommandText = "DELETE FROM [$tbl] WHERE CATALOG='$catEsc' AND MANUFACTURER='$mfgEsc'"
+  $null = $del.ExecuteNonQuery()
+
+  $cols = @()
+  $vals = @()
+  foreach ($c in @('CATALOG','MANUFACTURER','DESCRIPTION','RATING','COILPINS','ASSEMBLYCODE','WDBLKNAM','WEBLINK')) {{
+    if ($avail -contains $c) {{
+      $cols += $c
+      $v = [string]$r.$c
+      if ([string]::IsNullOrEmpty($v)) {{ $vals += 'NULL' }} else {{ $vals += "'" + $v.Replace("'", "''") + "'" }}
+    }}
+  }}
+  $ins = $conn.CreateCommand()
+  $ins.CommandText = "INSERT INTO [$tbl] (" + ($cols -join ', ') + ") VALUES (" + ($vals -join ', ') + ")"
+  $null = $ins.ExecuteNonQuery()
+  $count++
+
+  if (-not [string]::IsNullOrEmpty($r.PINLIST)) {{
+    $delP = $conn.CreateCommand()
+    $delP.CommandText = "DELETE FROM [_PINLIST] WHERE CATALOG='$catEsc' AND MANUFACTURER='$mfgEsc'"
+    $null = $delP.ExecuteNonQuery()
+    $assyV = if ([string]::IsNullOrEmpty($r.ASSEMBLYCODE)) {{ 'NULL' }} else {{ "'" + $r.ASSEMBLYCODE.Replace("'", "''") + "'" }}
+    $coilV = if ([string]::IsNullOrEmpty($r.COILPINS)) {{ 'NULL' }} else {{ "'" + $r.COILPINS.Replace("'", "''") + "'" }}
+    $pinV = "'" + $r.PINLIST.Replace("'", "''") + "'"
+    $insP = $conn.CreateCommand()
+    $insP.CommandText = "INSERT INTO [_PINLIST] (MANUFACTURER, CATALOG, ASSEMBLYCODE, COILPINS, PINLIST) VALUES ('$mfgEsc', '$catEsc', $assyV, $coilV, $pinV)"
+    $null = $insP.ExecuteNonQuery()
+    $count++
+  }}
 }}
 $conn.Close()
-Write-Output $applied
+Write-Output $count
 """
     applied = int(_run_ps_odbc(ps) or "0")
     return {"catalog_rows": len(rows), "sql_statements": applied}

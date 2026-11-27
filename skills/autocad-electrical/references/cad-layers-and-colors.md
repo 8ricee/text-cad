@@ -8,20 +8,24 @@ Quy chuẩn phân bổ **Layer**, **Thuộc tính Wire Type (`COLOR` + `SIZE`)**
 
 ### A. Layer Dây điện (`Create/Edit Wire Type` – Lệnh `AEWIRETYPE`)
 > **Quy tắc bắt buộc:** Trong hộp thoại `Create/Edit Wire Type`, **không được chỉ đặt tên Layer chung chung** (như `PWR_L1` hay `CTRL_24VDC`). Bắt buộc phải khai báo đầy đủ 2 cột thuộc tính **`Color`** và **`Size`** cho từng loại dây (và đặt tên Layer theo cú pháp `<MẠCH>_<MÀU>_<TIẾT_DIỆN>`) để báo cáo **From/To Wire List** xuất ra chính xác màu dây và tiết diện cho thợ đấu tủ.
+>
+> **Quy chuẩn chọn Profile màu dây 3 pha (chọn 1 Profile nhất quán cho toàn dự án, không trộn lẫn):**
+> - **Profile A (IEC 60445 — Mặc định Quốc tế / EU):** `L1 = BN (Brown)`, `L2 = BK (Black)`, `L3 = GY (Grey)`, `N = BU (Blue)`, `PE = GNYE`.
+> - **Profile B (TCVN — Dự án nội địa Việt Nam):** `L1 = RD (Red)`, `L2 = YE (Yellow)`, `L3 = BU (Blue)`, `N = BK (Black)` hoặc `BU`, `PE = GNYE`.
 
-| Tên Layer (`Wire Type`) | Cột `Color` (ACADE) | Cột `Size` (ACADE) | Ý nghĩa mạch | Mã màu CAD (ACI) | Độ dày nét in | Kiểu nét (`Linetype`) |
-| :--- | :---: | :---: | :--- | :--- | :---: | :--- |
-| `PWR_L1_BK_2.5` *(hoặc 4.0..240)* | `BK` (IEC) / `RD` (TCVN) | `2.5mm²` *(theo tải)* | Pha L1 động lực | `1` (Red) hoặc `32` (Brown) | `0.35 mm` | `CONTINUOUS` |
-| `PWR_L2_BK_2.5` | `BK` (IEC) / `YE` (TCVN) | `2.5mm²` *(theo tải)* | Pha L2 động lực | `40` / `30` (Dark Yellow/Orange, tránh `2` vì mờ trên nền trắng) | `0.35 mm` | `CONTINUOUS` |
-| `PWR_L3_BK_2.5` | `BK` (IEC) / `BU` (TCVN) | `2.5mm²` *(theo tải)* | Pha L3 động lực | `5` (Blue) hoặc `8` (Grey) | `0.35 mm` | `CONTINUOUS` |
-| `PWR_N_BU_2.5` | `BU` (Light Blue) | `2.5mm²` *(theo tải)* | Dây Trung tính (`N`) | `4` (Cyan) | `0.35 mm` | `CONTINUOUS` |
-| `PWR_PE_GNYE_2.5` | `GNYE` (Green-Yellow) | `2.5mm²` *(theo tải)* | Dây Tiếp địa (`PE`) | `3` (Green) | `0.35 mm` | **`CONTINUOUS`** *(Không dùng DASHDOT vì PE là dây vật lý)* |
-| `CTRL_220AC_RD_1.0` | `RD` (Red) | `1.0mm²` | Điều khiển L (220VAC) | `6` (Magenta) | `0.25 mm` | `CONTINUOUS` |
-| `CTRL_220AC_WH_1.0` | `WH` / `BU` | `1.0mm²` | Điều khiển N (220VAC) | `4` (Cyan) | `0.25 mm` | `CONTINUOUS` |
-| `CTRL_24VDC_DBU_0.75` | `DBU` (Dark Blue) / `RD` | `0.75mm²` | Nguồn +24VDC & DO | `30` (Orange) | `0.25 mm` | `CONTINUOUS` |
-| `CTRL_0VDC_BUWH_0.75` | `BU/WH` (Blue-White) | `0.75mm²` | Nguồn 0VDC Common (PELV) | `5` (Blue) | `0.25 mm` | `CONTINUOUS` |
-| `SIG_PLC_BU_0.5` | `BU` (Blue) | `0.5mm²` | Tín hiệu PLC DI / AI | `3` (Green) hoặc `4` (Cyan) | `0.25 mm` | `CONTINUOUS` |
-| `SAFE_24VDC_YE_0.75` | `YE` (Yellow) | `0.75mm²` | Mạch Safety 2 kênh (E-Stop / F-DI) | `40` (Dark Yellow) | `0.25 mm` | `CONTINUOUS` |
+| Tên Layer (`Wire Type`) | Profile A (IEC 60445) | Profile B (TCVN) | Cột `Size` (ACADE) | Ý nghĩa mạch | Mã màu CAD (ACI) | Độ dày nét in | Kiểu nét (`Linetype`) |
+| :--- | :---: | :---: | :---: | :--- | :--- | :---: | :--- |
+| `PWR_L1_BN_2.5` *(TCVN: `_RD_2.5`)* | `BN` | `RD` | `2.5mm²` *(theo tải)* | Pha L1 động lực | `1` (Red) hoặc `32` (Brown) | `0.35 mm` | `CONTINUOUS` |
+| `PWR_L2_BK_2.5` *(TCVN: `_YE_2.5`)* | `BK` | `YE` | `2.5mm²` *(theo tải)* | Pha L2 động lực | `40` / `30` (Dark Yellow/Orange, tránh `2` vì mờ trên nền trắng) | `0.35 mm` | `CONTINUOUS` |
+| `PWR_L3_GY_2.5` *(TCVN: `_BU_2.5`)* | `GY` | `BU` | `2.5mm²` *(theo tải)* | Pha L3 động lực | `5` (Blue) hoặc `8` (Grey) | `0.35 mm` | `CONTINUOUS` |
+| `PWR_N_BU_2.5` | `BU` (Light Blue) | `BU` / `BK` | `2.5mm²` *(theo tải)* | Dây Trung tính (`N`) | `4` (Cyan) | `0.35 mm` | `CONTINUOUS` |
+| `PWR_PE_GNYE_2.5` | `GNYE` | `GNYE` | `2.5mm²` *(theo tải)* | Dây Tiếp địa (`PE`) | `3` (Green) | `0.35 mm` | **`CONTINUOUS`** *(Không dùng DASHDOT vì PE là dây vật lý)* |
+| `CTRL_220AC_RD_1.0` | `RD` (Red) | `RD` | `1.0mm²` | Điều khiển L (220VAC) | `6` (Magenta) | `0.25 mm` | `CONTINUOUS` |
+| `CTRL_220AC_WH_1.0` | `WH` / `BU` | `WH` / `BU` | `1.0mm²` | Điều khiển N (220VAC) | `4` (Cyan) | `0.25 mm` | `CONTINUOUS` |
+| `CTRL_24VDC_DBU_0.75` | `DBU` (Dark Blue) | `DBU` / `RD` | `0.75mm²` | Nguồn +24VDC & DO | `30` (Orange) | `0.25 mm` | `CONTINUOUS` |
+| `CTRL_0VDC_BUWH_0.75` | `BU/WH` (Blue-White) | `BU/WH` | `0.75mm²` | Nguồn 0VDC Common (PELV) | `5` (Blue) | `0.25 mm` | `CONTINUOUS` |
+| `SIG_PLC_BU_0.5` | `BU` (Blue) | `BU` | `0.5mm²` | Tín hiệu PLC DI / AI | `3` (Green) hoặc `4` (Cyan) | `0.25 mm` | `CONTINUOUS` |
+| `SAFE_24VDC_YE_0.75` | `YE` (Yellow) | `YE` | `0.75mm²` | Mạch Safety 2 kênh (E-Stop / F-DI) | `40` (Dark Yellow) | `0.25 mm` | `CONTINUOUS` |
 
 ### B. Layer Ký hiệu, Chữ & Khung bản vẽ (Schematic Elements)
 | Tên Layer | Đối tượng | Mã màu CAD (ACI) | Độ dày nét in | Kiểu nét |

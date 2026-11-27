@@ -507,6 +507,56 @@ if ($tables -contains "FILETIME") {{
     try {{ $fileRows = Run-Query "SELECT FULLFILENAME, DWGNAME FROM [FILETIME] ORDER BY DWGIX" }} catch {{}}
 }}
 
+$dupTermNums = @()
+if ($tables -contains "TERMS") {{
+    try {{
+        $dupTermNums = Run-Query "SELECT INST, LOC, TAGSTRIP, TERM, COUNT(*) AS CNT FROM [TERMS] WHERE TERM IS NOT NULL AND TERM<>'' AND (LNUMBER IS NULL OR LNUMBER='') GROUP BY INST, LOC, TAGSTRIP, TERM HAVING COUNT(*) > 1"
+    }} catch {{}}
+}}
+
+$pinViolations = @()
+if ($tables -contains "COMP") {{
+    try {{
+        $compPins = Run-Query "SELECT TAGNAME, PAR1_CHLD2, TERM01, TERM02, CAT FROM [COMP] WHERE TAGNAME IS NOT NULL AND TAGNAME<>''"
+        $seenPins = @{{}}
+        foreach ($cp in $compPins) {{
+            $tg = [string]$cp.TAGNAME
+            $t1 = ([string]$cp.TERM01).Trim()
+            $t2 = ([string]$cp.TERM02).Trim()
+            if ($t1 -ne "" -or $t2 -ne "") {{
+                $pk = "$tg|$t1|$t2"
+                if ($seenPins.ContainsKey($pk)) {{
+                    $pinViolations += @{{ TAGNAME = $tg; TERM01 = $t1; TERM02 = $t2; REASON = "DUPLICATE_CONTACT_PINS" }}
+                }} else {{
+                    $seenPins[$pk] = $true
+                }}
+            }}
+        }}
+    }} catch {{}}
+}}
+
+$sigMismatches = @()
+if ($tables -contains "SIG") {{
+    try {{
+        $sigRows = Run-Query "SELECT SIGCODE, CODE, WIRENO FROM [SIG] WHERE SIGCODE IS NOT NULL AND SIGCODE<>''"
+        $sigMap = @{{}}
+        foreach ($sr in $sigRows) {{
+            $sc = ([string]$sr.SIGCODE).Trim()
+            if (-not $sigMap.ContainsKey($sc)) {{ $sigMap[$sc] = @{{ S = 0; D = 0; wires = @() }} }}
+            $cd = ([string]$sr.CODE).Trim().ToUpper()
+            if ($cd -eq "S") {{ $sigMap[$sc].S++ }} elseif ($cd -eq "D") {{ $sigMap[$sc].D++ }}
+            $wn = ([string]$sr.WIRENO).Trim()
+            if ($wn -ne "" -and ($sigMap[$sc].wires -notcontains $wn)) {{ $sigMap[$sc].wires += $wn }}
+        }}
+        foreach ($k in $sigMap.Keys) {{
+            $v = $sigMap[$k]
+            if ($v.S -eq 0 -or $v.D -eq 0 -or $v.wires.Count -gt 1) {{
+                $sigMismatches += @{{ SIGCODE = $k; SRC = $v.S; DST = $v.D; WIRENOS = ($v.wires -join ',') }}
+            }}
+        }}
+    }} catch {{}}
+}}
+
 $conn.Close()
 
 @{{
@@ -519,6 +569,9 @@ $conn.Close()
     family_block_misuse = $familyMisuse
     wire_errors = $wireErrs
     schematic_vs_panel_discrepancy = $panelDiscrepancies
+    pinlist_overuse_or_dup_pins = $pinViolations
+    cross_sheet_sigcode_mismatch = $sigMismatches
+    duplicate_terminal_numbers = $dupTermNums
     filetime_rows = $fileRows
 }} | ConvertTo-Json -Depth 6 -Compress
 """
@@ -567,6 +620,9 @@ $conn.Close()
         "wire_errors",
         "schematic_vs_panel_discrepancy",
         "family_block_misuse",
+        "pinlist_overuse_or_dup_pins",
+        "cross_sheet_sigcode_mismatch",
+        "duplicate_terminal_numbers",
         "modelspace_titleblock_violations",
         "unupdated_titleblocks",
         "short_circuit_nets",
@@ -586,6 +642,9 @@ $conn.Close()
         "wire_errors": len(raw["wire_errors"]),
         "schematic_vs_panel_discrepancy": len(raw["schematic_vs_panel_discrepancy"]),
         "family_block_misuse": len(fam_misuse),
+        "pinlist_overuse_or_dup_pins": len(raw.get("pinlist_overuse_or_dup_pins") or []),
+        "cross_sheet_sigcode_mismatch": len(raw.get("cross_sheet_sigcode_mismatch") or []),
+        "duplicate_terminal_numbers": len(raw.get("duplicate_terminal_numbers") or []),
         "modelspace_titleblock_violations": len(dwg_findings["modelspace_titleblock_violations"]),
         "unupdated_titleblocks": len(dwg_findings["unupdated_titleblocks"]),
         "short_circuit_nets": len(dwg_findings["short_circuit_nets"]),
@@ -609,6 +668,9 @@ $conn.Close()
             "wire_errors": raw["wire_errors"][:10],
             "schematic_vs_panel_discrepancy": raw["schematic_vs_panel_discrepancy"][:10],
             "family_block_misuse": fam_misuse[:10],
+            "pinlist_overuse_or_dup_pins": (raw.get("pinlist_overuse_or_dup_pins") or [])[:10],
+            "cross_sheet_sigcode_mismatch": (raw.get("cross_sheet_sigcode_mismatch") or [])[:10],
+            "duplicate_terminal_numbers": (raw.get("duplicate_terminal_numbers") or [])[:10],
             "modelspace_titleblock_violations": dwg_findings["modelspace_titleblock_violations"][:10],
             "unupdated_titleblocks": dwg_findings["unupdated_titleblocks"][:10],
             "short_circuit_nets": dwg_findings["short_circuit_nets"][:10],
@@ -622,7 +684,7 @@ $conn.Close()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="ACADE Scratch DB + Electrical Netlist DRC & Layout Gatekeeper v3.0 (Fail-Closed)")
+    parser = argparse.ArgumentParser(description="ACADE Scratch DB + Electrical Netlist DRC & Layout Gatekeeper v3.1 (Fail-Closed)")
     parser.add_argument("--mdb", type=Path, required=True, help="Path to <project>.mdb Scratch Database")
     parser.add_argument("--project-dir", type=Path, default=None, help="Optional project folder or 01_Drawings folder for DWG DRC")
     args = parser.parse_args()

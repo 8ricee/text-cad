@@ -32,7 +32,7 @@ File `.dwg`/`.dxf` tải từ web hãng thường là **hình học tĩnh (Dumb 
 2. Kiểm tra đơn vị (`UNITS`): Chuyển về **`Millimeters`**, đo kiểm tra lại 1 kích thước chuẩn theo Datasheet (nếu file hãng xuất theo `cm` hoặc `m` thì `SCALE` về đúng `1:1 mm`).
 3. Xóa bỏ khung tên hãng, đường kích thước thừa, text ghi chú không cần thiết và các lớp `HATCH` đặc gây nặng file.
 4. Chạy **`OVERKILL`** để gộp các đoạn thẳng trùng lặp → **`PURGE`** để dọn sạch layer/block rác.
-5. Chuyển toàn bộ nét về Layer `0` (hoặc Layer chuẩn `PNL_DEVICE` theo [cad-layers-and-colors.md](cad-layers-and-colors.md)) với màu `ByBlock` / `ByLayer`.
+5. Chuyển toàn bộ nét bên trong block về Layer `0` với màu `ByBlock` / `ByLayer` (sau đó khi chèn `BlockReference` lên bản vẽ tủ thì đặt ở Layer chuẩn `PNL_FOOTPRINT` theo [cad-layers-and-colors.md](cad-layers-and-colors.md)).
 6. Đặt **`BASE`** (`Base Point`) chuẩn tại vị trí gá lắp thực tế (tâm rãnh gài `DIN Rail TS35` hoặc tâm lỗ bắt vít trên cùng bên trái).
 
 ---
@@ -58,7 +58,7 @@ Khi hãng **chỉ cung cấp file 3D (`.stp`, `.step`, `.iges`, `.sat`)** hoặc
 4. **Xóa khối 3D Solid gốc & Dọn nét trùng:**
    - **BẮT BUỘC xóa ngay khối `3D Solid` gốc** sau khi `FLATSHOT` xong (tuyệt đối không để `3D Solid` tồn tại trong `07_panel_layout.dwg` vì sẽ làm dung lượng file tăng hàng chục MB và gây giật lag Project Manager).
    - Chọn block 2D vừa tạo → **`EXPLODE`** → chạy **`OVERKILL`** để xóa các đường trùng đè lên nhau sinh ra từ mặt cong 3D → kiểm tra lại kích thước `W × H` khớp `1:1 mm` với Datasheet.
-   - Đưa về Layer chuẩn (`0` / `PNL_DEVICE`) và đặt **`Base Point`** chuẩn.
+   - Đưa nét bên trong block về Layer `0` (sau đó đặt `BlockReference` lên Layer `PNL_FOOTPRINT`) và đặt **`Base Point`** chuẩn.
 
 ---
 
